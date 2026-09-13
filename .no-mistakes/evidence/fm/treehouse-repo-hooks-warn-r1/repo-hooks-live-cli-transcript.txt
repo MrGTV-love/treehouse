@@ -1,0 +1,39 @@
+SCENARIO 1: get --lease warns on stderr, preserves path-only stdout, and does not execute repo hook
+PASS stdout=/Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-repo-hooks-test/home/.treehouse/myrepo-0b0c86/1/myrepo
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-repo-hooks-test/a/myrepo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Setting up worktree...
+🌳 Leased worktree at ~/.treehouse/myrepo-0b0c86/1/myrepo. Run 'treehouse return ~/.treehouse/myrepo-0b0c86/1/myrepo' to release it.
+SCENARIO 2: single-target destroy from another configured repo warns only for target owner; dry run executes no hook
+PASS target-only warning and no dry-run hook
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-repo-hooks-test/b/myrepo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Dry run: nothing disposable to destroy in ~/.treehouse/myrepo-0b0c86/2/myrepo.
+🌳 Skipped 1 worktree:
+  2     [leased]  ~/.treehouse/myrepo-0b0c86/2/myrepo  re-run with --include-leased to include
+SCENARIO 3: leased destroy executes user pre_destroy, ignores repo pre_destroy, removes target
+PASS user hook ran and repo hook did not
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-repo-hooks-test/b/myrepo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Destroyed 1 worktree in ~/.treehouse/myrepo-0b0c86/2/myrepo and freed 369 B.
+  2     [leased]  369 B  ~/.treehouse/myrepo-0b0c86/2/myrepo
+SCENARIO 4: bulk dry run warns once for each distinct repository in shared locked target set
+PASS each owning config warned exactly once and no targets removed
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-repo-hooks-test/a/myrepo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-repo-hooks-test/b/myrepo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Dry run: nothing disposable to destroy in ~/.treehouse/myrepo-0b0c86.
+🌳 Skipped 2 worktrees:
+  1     [leased]  ~/.treehouse/myrepo-0b0c86/1/myrepo  leased: name the exact path with --include-leased (never removed by --all)
+  2     [leased]  ~/.treehouse/myrepo-0b0c86/2/myrepo  leased: name the exact path with --include-leased (never removed by --all)
+SCENARIO 5: malformed target repo config does not block actual destroy
+PASS malformed config remained non-fatal
+🌳 Destroyed 1 worktree in ~/.treehouse/myrepo-0b0c86/2/myrepo and freed 369 B.
+  2     [leased]  369 B  ~/.treehouse/myrepo-0b0c86/2/myrepo
+SCENARIO 6: dirty and disposable actual destroys execute user pre_destroy; repos without hook declarations stay warning-free
+PASS dirty and disposable destroys each ran the user hook; hook-free repositories emitted no ignored-hooks warning
+🌳 Destroyed 1 worktree in ~/.treehouse/dirtyrepo-dcb172/1/dirtyrepo and freed 407 B.
+  1     [dirty]  407 B  ~/.treehouse/dirtyrepo-dcb172/1/dirtyrepo  (uncommitted changes)
+🌳 Destroyed 1 worktree in ~/.treehouse/cleanrepo-584081/1/cleanrepo and freed 369 B.
+  1     [disposable]  369 B  ~/.treehouse/cleanrepo-584081/1/cleanrepo

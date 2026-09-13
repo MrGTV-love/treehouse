@@ -1,0 +1,235 @@
+{
+  "temporary_root": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju",
+  "results": [
+    {
+      "name": "get --lease warns on stderr, preserves path-only stdout, and does not execute repository hooks",
+      "result": "pass"
+    },
+    {
+      "name": "repositories with no config or no hooks produce no ignored-hooks warning",
+      "result": "pass"
+    },
+    {
+      "name": "bulk destroy deduplicates repeated checks while naming ignored keys and the user config destination",
+      "result": "pass"
+    },
+    {
+      "name": "destroying a named worktree from outside its repository warns only for that worktree owner",
+      "result": "pass"
+    },
+    {
+      "name": "bulk destroy warns exactly once for each owning repository in its target snapshot",
+      "result": "pass"
+    },
+    {
+      "name": "destroy remains non-fatal and removes its target when repository configuration is malformed",
+      "result": "pass"
+    },
+    {
+      "name": "user pre_destroy runs for disposable, leased, and dirty removals but not for dry-run",
+      "result": "pass"
+    }
+  ],
+  "commands": [
+    {
+      "label": "ignored repo hooks warning on get --lease",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s1/repos/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s1/home/pools/.treehouse/project-ab26d9/1/project\n",
+      "stderr": "\ud83c\udf33 Warning: ignoring [hooks] in /private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s1/repos/project/treehouse.toml: post_create, pre_destroy\n   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.\n\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-ab26d9/1/project. Run 'treehouse return ~/pools/.treehouse/project-ab26d9/1/project' to release it.\n"
+    },
+    {
+      "label": "no repo config stays quiet",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s2/r1/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s2/home/pools/.treehouse/project-1d8eb3/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-1d8eb3/1/project. Run 'treehouse return ~/pools/.treehouse/project-1d8eb3/1/project' to release it.\n"
+    },
+    {
+      "label": "repo config without hooks stays quiet",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s2/r2/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s2/home/pools/.treehouse/project-279e84/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-279e84/1/project. Run 'treehouse return ~/pools/.treehouse/project-279e84/1/project' to release it.\n"
+    },
+    {
+      "label": "dedupe setup lease 1",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s3/repos/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s3/home/pools/.treehouse/project-15820a/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-15820a/1/project. Run 'treehouse return ~/pools/.treehouse/project-15820a/1/project' to release it.\n"
+    },
+    {
+      "label": "dedupe setup lease 2",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s3/repos/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s3/home/pools/.treehouse/project-15820a/2/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-15820a/2/project. Run 'treehouse return ~/pools/.treehouse/project-15820a/2/project' to release it.\n"
+    },
+    {
+      "label": "bulk dry-run repeated warning checks",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s3",
+      "command": "treehouse destroy /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s3/home/pools/.treehouse/project-15820a --all",
+      "exit": 0,
+      "stdout": "\ud83c\udf33 Dry run: nothing disposable to destroy in ~/pools/.treehouse/project-15820a.\n\ud83c\udf33 Skipped 2 worktrees:\n  1     [leased]  ~/pools/.treehouse/project-15820a/1/project  leased: name the exact path with --include-leased (never removed by --all)\n  2     [leased]  ~/pools/.treehouse/project-15820a/2/project  leased: name the exact path with --include-leased (never removed by --all)\n",
+      "stderr": "\ud83c\udf33 Warning: ignoring [hooks] in /private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s3/repos/project/treehouse.toml: post_create, pre_destroy\n   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.\n"
+    },
+    {
+      "label": "shared pool clone A lease",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s4/cloneA/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s4/home/pools/.treehouse/project-7044f9/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-7044f9/1/project. Run 'treehouse return ~/pools/.treehouse/project-7044f9/1/project' to release it.\n"
+    },
+    {
+      "label": "shared pool clone B lease",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s4/cloneB/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s4/home/pools/.treehouse/project-7044f9/2/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-7044f9/2/project. Run 'treehouse return ~/pools/.treehouse/project-7044f9/2/project' to release it.\n"
+    },
+    {
+      "label": "single destroy from outside targets clone B config",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s4/outside",
+      "command": "treehouse destroy /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s4/home/pools/.treehouse/project-7044f9/2/project",
+      "exit": 0,
+      "stdout": "\ud83c\udf33 Dry run: nothing disposable to destroy in ~/pools/.treehouse/project-7044f9/2/project.\n\ud83c\udf33 Skipped 1 worktree:\n  2     [leased]  ~/pools/.treehouse/project-7044f9/2/project  re-run with --include-leased to include\n",
+      "stderr": "\ud83c\udf33 Warning: ignoring [hooks] in /private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s4/cloneB/project/treehouse.toml: post_create, pre_destroy\n   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.\n"
+    },
+    {
+      "label": "bulk clone A lease",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s5/cloneA/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s5/home/pools/.treehouse/project-cd424c/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-cd424c/1/project. Run 'treehouse return ~/pools/.treehouse/project-cd424c/1/project' to release it.\n"
+    },
+    {
+      "label": "bulk clone B lease",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s5/cloneB/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s5/home/pools/.treehouse/project-cd424c/2/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-cd424c/2/project. Run 'treehouse return ~/pools/.treehouse/project-cd424c/2/project' to release it.\n"
+    },
+    {
+      "label": "shared pool bulk warning dry-run",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s5",
+      "command": "treehouse destroy /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s5/home/pools/.treehouse/project-cd424c --all",
+      "exit": 0,
+      "stdout": "\ud83c\udf33 Dry run: nothing disposable to destroy in ~/pools/.treehouse/project-cd424c.\n\ud83c\udf33 Skipped 2 worktrees:\n  1     [leased]  ~/pools/.treehouse/project-cd424c/1/project  leased: name the exact path with --include-leased (never removed by --all)\n  2     [leased]  ~/pools/.treehouse/project-cd424c/2/project  leased: name the exact path with --include-leased (never removed by --all)\n",
+      "stderr": "\ud83c\udf33 Warning: ignoring [hooks] in /private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s5/cloneA/project/treehouse.toml: post_create, pre_destroy\n   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.\n\ud83c\udf33 Warning: ignoring [hooks] in /private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s5/cloneB/project/treehouse.toml: post_create, pre_destroy\n   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.\n"
+    },
+    {
+      "label": "malformed config setup lease",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s6/repos/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s6/home/pools/.treehouse/project-db11cb/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-db11cb/1/project. Run 'treehouse return ~/pools/.treehouse/project-db11cb/1/project' to release it.\n"
+    },
+    {
+      "label": "destroy survives malformed repo config",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s6",
+      "command": "treehouse destroy /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s6/home/pools/.treehouse/project-db11cb/1/project --include-leased --yes",
+      "exit": 0,
+      "stdout": "\ud83c\udf33 Destroyed 1 worktree in ~/pools/.treehouse/project-db11cb/1/project and freed 358 B.\n  1     [leased]  358 B  ~/pools/.treehouse/project-db11cb/1/project\n",
+      "stderr": ""
+    },
+    {
+      "label": "matrix disposable acquire",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/repos/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-47301b/1/project. Run 'treehouse return ~/pools/.treehouse/project-47301b/1/project' to release it.\n"
+    },
+    {
+      "label": "matrix disposable release",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7",
+      "command": "treehouse return /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project",
+      "exit": 0,
+      "stdout": "",
+      "stderr": "\ud83c\udf33 Worktree returned to pool.\n"
+    },
+    {
+      "label": "matrix disposable destroy",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7",
+      "command": "treehouse destroy /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project --yes",
+      "exit": 0,
+      "stdout": "\ud83c\udf33 Destroyed 1 worktree in ~/pools/.treehouse/project-47301b/1/project and freed 358 B.\n  1     [disposable]  358 B  ~/pools/.treehouse/project-47301b/1/project\n",
+      "stderr": ""
+    },
+    {
+      "label": "matrix leased acquire",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/repos/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-47301b/1/project. Run 'treehouse return ~/pools/.treehouse/project-47301b/1/project' to release it.\n"
+    },
+    {
+      "label": "matrix leased destroy",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7",
+      "command": "treehouse destroy /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project --include-leased --yes",
+      "exit": 0,
+      "stdout": "\ud83c\udf33 Destroyed 1 worktree in ~/pools/.treehouse/project-47301b/1/project and freed 358 B.\n  1     [leased]  358 B  ~/pools/.treehouse/project-47301b/1/project\n",
+      "stderr": ""
+    },
+    {
+      "label": "matrix dirty acquire",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/repos/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-47301b/1/project. Run 'treehouse return ~/pools/.treehouse/project-47301b/1/project' to release it.\n"
+    },
+    {
+      "label": "matrix dirty release",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7",
+      "command": "treehouse return /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project",
+      "exit": 0,
+      "stdout": "",
+      "stderr": "\ud83c\udf33 Worktree returned to pool.\n"
+    },
+    {
+      "label": "matrix dirty destroy",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7",
+      "command": "treehouse destroy /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project --include-unlanded --yes",
+      "exit": 0,
+      "stdout": "\ud83c\udf33 Destroyed 1 worktree in ~/pools/.treehouse/project-47301b/1/project and freed 396 B.\n  1     [dirty]  396 B  ~/pools/.treehouse/project-47301b/1/project  (uncommitted changes)\n",
+      "stderr": ""
+    },
+    {
+      "label": "matrix dry-run acquire",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/repos/project",
+      "command": "treehouse get --lease",
+      "exit": 0,
+      "stdout": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project\n",
+      "stderr": "\ud83c\udf33 Setting up worktree...\n\ud83c\udf33 Leased worktree at ~/pools/.treehouse/project-47301b/1/project. Run 'treehouse return ~/pools/.treehouse/project-47301b/1/project' to release it.\n"
+    },
+    {
+      "label": "matrix dry-run release",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7",
+      "command": "treehouse return /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project",
+      "exit": 0,
+      "stdout": "",
+      "stderr": "\ud83c\udf33 Worktree returned to pool.\n"
+    },
+    {
+      "label": "matrix dry-run does not invoke hook",
+      "cwd": "/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7",
+      "command": "treehouse destroy /var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/treehouse-live-2qo9s0ju/s7/home/pools/.treehouse/project-47301b/1/project",
+      "exit": 0,
+      "stdout": "\ud83c\udf33 Dry run: would destroy 1 worktree in ~/pools/.treehouse/project-47301b/1/project and reclaim 358 B.\n  1     [disposable]  358 B  ~/pools/.treehouse/project-47301b/1/project\n\ud83c\udf33 Re-run with --yes to destroy this worktree.\n",
+      "stderr": ""
+    }
+  ]
+}

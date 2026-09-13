@@ -1,0 +1,45 @@
+SCENARIO: get --lease warning stays on stderr and repo hooks remain ignored
+leased_path_exists=True
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-hooks.m9dgZw/a/myrepo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Setting up worktree...
+🌳 Leased worktree at ~/.treehouse/myrepo-82375d/1/myrepo. Run 'treehouse return ~/.treehouse/myrepo-82375d/1/myrepo' to release it.
+user_post_create_ran=yes
+repo_post_create_ran=no
+
+SCENARIO: repeated target checks are deduplicated per repository and name destination/keys
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-hooks.m9dgZw/a/myrepo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-hooks.m9dgZw/b/myrepo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+warning_count[/Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-hooks.m9dgZw/a/myrepo/treehouse.toml]=1
+warning_count[/Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-hooks.m9dgZw/b/myrepo/treehouse.toml]=1
+names_post_create=True
+names_pre_destroy=True
+names_user_config_destination=True
+dry_run_stdout:
+🌳 Dry run: nothing disposable to destroy in ~/.treehouse/myrepo-82375d.
+🌳 Skipped 3 worktrees:
+  1     [leased,dirty]  ~/.treehouse/myrepo-82375d/1/myrepo  leased: name the exact path with --include-leased (never removed by --all)
+  2     [leased,dirty]  ~/.treehouse/myrepo-82375d/2/myrepo  leased: name the exact path with --include-leased (never removed by --all)
+  3     [leased,dirty]  ~/.treehouse/myrepo-82375d/3/myrepo  leased: name the exact path with --include-leased (never removed by --all)
+worktrees_survive_dry_run=yes
+pre_destroy_not_run_on_dry_run=yes
+
+SCENARIO: no warning without a repository hooks declaration
+no_repo_file_warning_bytes=0
+no_hooks_warning_bytes=0
+
+SCENARIO: public repository configuration documentation directs hooks to user config
+example_names_user_config=True
+example_has_active_hooks_table=False
+readme_names_user_config=True
+readme_explains_repo_hooks_ignored=True
+
+CORRECTION: exact get --lease stdout byte check
+raw_stdout_repr=b'/Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-stdout.Z7kXL6/home/.treehouse/repo-c96b7c/1/repo\n'
+exactly_one_newline_terminated_path=True
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2D0AB1VPEGB1BN6TWSFGCQN/.live-stdout.Z7kXL6/repo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Setting up worktree...
+🌳 Leased worktree at ~/.treehouse/repo-c96b7c/1/repo. Run 'treehouse return ~/.treehouse/repo-c96b7c/1/repo' to release it.

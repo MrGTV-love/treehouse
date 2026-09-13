@@ -1,0 +1,19 @@
+SCENARIO 1: repo-level hooks warn on stderr, do not run, and lease stdout remains path-only
+get_exit=0
+get_stdout_line_count=1
+get_stdout=/Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2CYGYKA51163600DR0990Z5/.live-hooks-check/home/.treehouse/repo-a6201d/1/repo
+repo_hooks_ran=no
+get_stderr:
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2CYGYKA51163600DR0990Z5/.live-hooks-check/repo/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+🌳 Setting up worktree...
+🌳 Leased worktree at ~/.treehouse/repo-a6201d/1/repo. Run 'treehouse return ~/.treehouse/repo-a6201d/1/repo' to release it.
+
+SCENARIO 2: destroy survives malformed repo config and honors user-level pre_destroy
+destroy_exit=0
+user_pre_destroy_ran=yes
+worktree_removed=yes
+destroy_stdout:
+🌳 Destroyed 1 worktree in ~/.treehouse/repo-a6201d/1/repo and freed 359 B.
+  1     [leased]  359 B  ~/.treehouse/repo-a6201d/1/repo
+destroy_stderr:

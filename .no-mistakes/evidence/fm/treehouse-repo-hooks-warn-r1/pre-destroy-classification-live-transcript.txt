@@ -1,0 +1,19 @@
+Live pre_destroy classification matrix
+disposable_hook_count=1 worktree_removed=yes
+leased_hook_count=2 worktree_removed=yes
+dirty_get_exit=3
+dirty_hook_count=3 destroy_reported_one_worktree=yes
+dry_run_hook_count_before=3 after=3 worktree_still_exists=yes
+disposable_destroy_output:
+🌳 Destroyed 1 worktree in ~/.treehouse/repo-8c0ac5/1/repo and freed 362 B.
+  1     [disposable]  362 B  ~/.treehouse/repo-8c0ac5/1/repo
+leased_destroy_output:
+🌳 Destroyed 1 worktree in ~/.treehouse/repo-8c0ac5/1/repo and freed 362 B.
+  1     [leased]  362 B  ~/.treehouse/repo-8c0ac5/1/repo
+dirty_destroy_output:
+🌳 Destroyed 1 worktree in ~/.treehouse/repo-8c0ac5/1/repo and freed 399 B.
+  1     [dirty]  399 B  ~/.treehouse/repo-8c0ac5/1/repo  (uncommitted changes)
+dry_run_output:
+🌳 Dry run: would destroy 1 worktree in ~/.treehouse/repo-8c0ac5/1/repo and reclaim 362 B.
+  1     [leased]  362 B  ~/.treehouse/repo-8c0ac5/1/repo
+🌳 Re-run with --yes --include-leased to destroy this worktree.

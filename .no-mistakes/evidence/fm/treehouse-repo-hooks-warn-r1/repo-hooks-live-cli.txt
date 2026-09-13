@@ -1,0 +1,33 @@
+
+== get --lease warns only on stderr and repo hook stays ignored ==
+stdout: /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2CZGH35QHMQGG1HWQEEQHPC/.e2e-live/home-warning/.treehouse/repo-warning-94490c/1/repo-warning
+stderr warning:
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2CZGH35QHMQGG1HWQEEQHPC/.e2e-live/repo-warning/treehouse.toml: post_create, pre_destroy
+   Lifecycle hooks run only from ~/.config/treehouse/config.toml; hooks in repo-level config are ignored for safety.
+repo hook executed: no
+
+== no warning without declared repo hook keys ==
+absent config warning: none
+safe config warning: none
+
+== user pre_destroy runs for disposable, leased, and dirty, but not dry-run ==
+disposable: hook count 1, worktree removed
+leased + --include-leased: hook count 2, worktree removed
+dirty + --include-unlanded: hook count 3, worktree removed
+dry run: hook count unchanged at 3, worktree preserved
+
+== destroy survives malformed target repo config ==
+exit: 0; worktree removed: yes; stdout: 🌳 Destroyed 1 worktree in ~/.treehouse/repo-invalid-223148/1/repo-invalid and freed 329 B.   1     [leased]  329 B  ~/.treehouse/repo-invalid-223148/1/repo-invalid 
+
+== bulk shared pool warns once for every owning repo, from outside either repo ==
+stderr warning files (each exactly once):
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2CZGH35QHMQGG1HWQEEQHPC/.e2e-live/shared-a/project/treehouse.toml: post_create
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2CZGH35QHMQGG1HWQEEQHPC/.e2e-live/shared-b/project/treehouse.toml: pre_destroy
+stdout contains warning paths: no
+
+ALL LIVE ASSERTIONS PASSED
+
+== single-target destroy resolves the named worktree owner, not cwd ==
+🌳 Warning: ignoring [hooks] in /Users/kunchen/.no-mistakes/worktrees/8c0b202f5740/01M2CZGH35QHMQGG1HWQEEQHPC/.e2e-single/target/treehouse.toml: pre_destroy
+current-repo warning emitted: no
+warning on stdout: no

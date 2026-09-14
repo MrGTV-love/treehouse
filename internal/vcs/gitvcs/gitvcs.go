@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -839,21 +841,72 @@ func RemoveSeededPathsFromJJWorkspace(worktreePath string, paths []string) error
 	return RemoveJJSeedAuthentication(worktreePath)
 }
 
+// PrepareJJSeededCleanup hardlinks the workspace's store pointer into the
+// authentication directory beside it, so the later cleanup can authenticate
+// itself. Treehouse removes the entries but never the directory. Repositories
+// whose worktrees share that parent share the directory while taking
+// independent pool state locks, so no pool can prove it is unused. A slot
+// worktree_path placed outside the pool therefore leaves the directory behind;
+// removing the directory safely needs a lock across pools. Its entries do get
+// dropped: pool removal unlinks them, and the removal routes that never reach
+// RemoveJJSeedAuthentication drop them themselves.
+//
+// An entry a removed workspace left behind does NOT make its path unusable.
+// jjSeedAuthenticationPath keys the entry on the worktree's own absolute path,
+// so the only workspace it can ever authenticate is the one at worktreePath -
+// which exists right now, and whose store pointer is markerPath. An occupant
+// that is not that file authenticates nothing, so the marker is relinked over
+// it. Without that, one failed cleanup would leave the path permanently
+// unseedable and only a manual delete would repair it.
 func PrepareJJSeededCleanup(worktreePath string) error {
 	authPath := jjSeedAuthenticationPath(worktreePath)
 	if err := os.MkdirAll(filepath.Dir(authPath), 0o700); err != nil {
 		return fmt.Errorf("creating jj seed authentication directory: %w", err)
 	}
 	markerPath := filepath.Join(worktreePath, ".jj", "repo")
-	if err := os.Link(markerPath, authPath); err != nil {
-		marker, markerErr := os.Stat(markerPath)
-		auth, authErr := os.Stat(authPath)
-		if markerErr == nil && authErr == nil && os.SameFile(marker, auth) {
-			return nil
-		}
+	err := os.Link(markerPath, authPath)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("authenticating seeded jj workspace: %w", err)
+	}
+	if sameFilePath(markerPath, authPath) {
+		return nil
+	}
+	// Anything but a plain file is not something treehouse wrote, so name it
+	// rather than replace it.
+	if info, statErr := os.Lstat(authPath); statErr != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("authenticating seeded jj workspace: %s is occupied and is not an authentication entry", authPath)
+	}
+	if err := relinkJJSeedAuthentication(markerPath, authPath); err != nil {
 		return fmt.Errorf("authenticating seeded jj workspace: %w", err)
 	}
 	return nil
+}
+
+// relinkJJSeedAuthentication points authPath at markerPath in a single rename,
+// so no instant exists in which the path holds no authentication at all.
+func relinkJJSeedAuthentication(markerPath, authPath string) error {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	staging := filepath.Join(filepath.Dir(authPath), ".relink-"+hex.EncodeToString(nonce[:]))
+	if err := os.Link(markerPath, staging); err != nil {
+		return err
+	}
+	if err := os.Rename(staging, authPath); err != nil {
+		_ = os.Remove(staging)
+		return err
+	}
+	return nil
+}
+
+func sameFilePath(left, right string) bool {
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 func AuthenticateJJSeededCleanup(worktreePath string) error {

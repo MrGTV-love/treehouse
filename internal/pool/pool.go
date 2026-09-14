@@ -94,8 +94,13 @@ type AcquireOptions struct {
 	// the pool ("<repo>-<slot>") instead of the repository name every slot
 	// shares. It only affects creation: a recycled slot keeps the path already
 	// recorded in pool state, so enabling it never moves or renames a worktree
-	// that already exists.
+	// that already exists. WorktreePath supersedes it, because a template names
+	// every segment of the path including the leaf.
 	UniqueLeaf bool
+	// WorktreePath templates the directory a newly created slot is placed in.
+	// Empty keeps the built-in {pool}/{slot}/{repo} layout. It is read only when
+	// a slot is created, so it never moves a worktree already in the pool.
+	WorktreePath string
 	// IncludeManifest replaces the committed manifest; nil keeps the default,
 	// while a non-nil empty slice explicitly disables seeding.
 	IncludeManifest []byte
@@ -106,7 +111,10 @@ type acquireOptions struct {
 	// skipFetch uses existing local refs without contacting origin.
 	skipFetch bool
 	// baseBranch is the explicitly requested base branch, or empty to infer it.
-	baseBranch      string
+	baseBranch string
+	// worktreePath templates where a newly created slot is placed, or empty for
+	// the built-in layout.
+	worktreePath    string
 	includeManifest []byte
 	// uniqueLeaf makes a newly created worktree's own directory name unique
 	// within the pool instead of the repository name every slot shares.
@@ -134,6 +142,7 @@ func AcquireWithOptions(repoRoot, poolDir string, poolSize int, postCreate []str
 	acquired, err := acquire(repoRoot, poolDir, poolSize, postCreate, acquireOptions{
 		skipFetch:       options.SkipFetch,
 		baseBranch:      options.BaseBranch,
+		worktreePath:    options.WorktreePath,
 		includeManifest: options.IncludeManifest,
 		uniqueLeaf:      options.UniqueLeaf,
 		hookStdout:      os.Stdout,
@@ -163,6 +172,7 @@ func AcquireLeaseInfoWithOptions(repoRoot, poolDir string, poolSize int, postCre
 	return acquire(repoRoot, poolDir, poolSize, postCreate, acquireOptions{
 		skipFetch:       options.SkipFetch,
 		baseBranch:      options.BaseBranch,
+		worktreePath:    options.WorktreePath,
 		includeManifest: options.IncludeManifest,
 		uniqueLeaf:      options.UniqueLeaf,
 		lease:           true,
@@ -285,7 +295,56 @@ func LeaseExisting(poolDir, name, holder string) (LeaseInfo, error) {
 	return lease, err
 }
 
+// freeTemplatedSlot picks the name and path a new templated worktree is created
+// under, skipping every candidate whose path something already occupies.
+// treehouse never adopts an existing directory, and a templated path can be one
+// the pool no longer records - state recovery reads the pool directory only, so
+// an out-of-pool worktree survives a lost state file while name allocation
+// restarts at the first name. Refusing that one name would hand out nothing at
+// all; skipping it keeps the pool usable while the operator clears the
+// leftovers. Each skip is stated on stderr so the leftover is visible, and it
+// stops there, because nothing here reads the occupant and so cannot vouch for
+// deleting it. Only when every candidate is occupied does the acquisition fail,
+// pointing at the repository's own worktree list rather than prescribing a
+// command whose preconditions treehouse cannot see from here.
+func freeTemplatedSlot(repoRoot, poolDir string, state State, poolSize int, opts acquireOptions) (string, string, error) {
+	first := nextSlotNumber(state)
+	var occupied []string
+	for n := first; n < first+poolSize; n++ {
+		name := strconv.Itoa(n)
+		wtPath, err := resolveWorktreePath(repoRoot, poolDir, name, opts.worktreePath, opts.uniqueLeaf)
+		if err != nil {
+			return "", "", err
+		}
+		_, statErr := os.Lstat(wtPath)
+		if os.IsNotExist(statErr) {
+			return name, wtPath, nil
+		}
+		if statErr != nil {
+			return "", "", statErr
+		}
+		fmt.Fprintf(os.Stderr, "🌳 Warning: skipped slot %s because its worktree path %s already exists.\n", name, wtPath)
+		occupied = append(occupied, wtPath)
+	}
+	return "", "", fmt.Errorf("every worktree path this pool would create already exists (%d checked, %s through %s); treehouse only creates a worktree at a path it can own and never adopts an existing directory. List this repository's worktrees with 'git worktree list' in %s and see the README section on recovering missing pool state to decide what to do with them",
+		len(occupied), occupied[0], occupied[len(occupied)-1], repoRoot)
+}
+
 func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts acquireOptions) (LeaseInfo, error) {
+	// Before the fetch and before any slot is inspected, so a template that is
+	// wrong on its own text costs nothing. The placement rules need a slot name
+	// and run under the state lock below.
+	if _, err := validateWorktreePathTemplate(opts.worktreePath); err != nil {
+		return LeaseInfo{}, err
+	}
+
+	// Said out loud rather than resolved silently: a template names the leaf
+	// itself, so unique_leaf has nothing left to rename, and a pool that sets
+	// both would otherwise get whichever leaf the template happens to end with.
+	if opts.worktreePath != "" && opts.uniqueLeaf {
+		fmt.Fprintf(os.Stderr, "🌳 Warning: worktree_path is set, so unique_leaf is ignored - the template names every segment of the path. Write %s in it for a unique leaf.\n", placeholderRepo+"-"+placeholderSlot)
+	}
+
 	fmt.Fprintf(os.Stderr, "🌳 Setting up worktree...\n")
 	if !opts.skipFetch && vcs.HasRemote(repoRoot, "origin") {
 		if err := vcs.Fetch(repoRoot); err != nil {
@@ -311,6 +370,24 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 
 		state, err = healState(poolDir, state)
 		if err != nil {
+			return err
+		}
+
+		// Placement rules run before the reuse loop so a recycling acquisition
+		// still reports a template that escapes into the repository or the pool -
+		// that branch never expands the template, so rules reached only from the
+		// creation branch would accept a bad template or reject it depending on how
+		// full the pool is. A template is only validated here; the creation branch
+		// resolves the path it actually uses, skipping names whose directories are
+		// occupied.
+		name := nextName(state)
+		var wtPath string
+		if opts.worktreePath == "" {
+			wtPath, err = resolveWorktreePath(repoRoot, poolDir, name, "", opts.uniqueLeaf)
+			if err != nil {
+				return err
+			}
+		} else if _, err := resolveWorktreePath(repoRoot, poolDir, name, opts.worktreePath, opts.uniqueLeaf); err != nil {
 			return err
 		}
 
@@ -439,19 +516,18 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			return fmt.Errorf("all %d worktrees are in use or dirty (max_trees = %d). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", len(state.Worktrees), poolSize)
 		}
 
-		name := nextName(state)
-		repoName := filepath.Base(repoRoot)
-		leaf := repoName
-		if opts.uniqueLeaf {
-			// The slot name is already unique within the pool and stays with
-			// the slot across recycles, so it is the cheapest thing that makes
-			// the leaf unique too and keeps the path stable for the caller.
-			// Only this creation branch is reached: the reuse loop above hands
-			// back the path already in state, so an existing worktree is never
-			// moved by turning the option on.
-			leaf = repoName + "-" + name
+		// A templated path can point anywhere, including at a directory another
+		// pool or checkout already owns - two pools whose templates agree would
+		// otherwise register the same worktree and each feel free to delete it.
+		// Occupied candidates are skipped rather than adopted. Only the templated
+		// path is checked: the built-in layout keeps whatever AddWorktree does with
+		// a leftover directory today.
+		if opts.worktreePath != "" {
+			name, wtPath, err = freeTemplatedSlot(repoRoot, poolDir, state, poolSize, opts)
+			if err != nil {
+				return err
+			}
 		}
-		wtPath := filepath.Join(poolDir, name, leaf)
 
 		if err := os.MkdirAll(filepath.Dir(wtPath), 0755); err != nil {
 			return err
@@ -973,6 +1049,49 @@ func removeAuthenticatedStaleJJSeedState(poolDir string, state State) error {
 	return nil
 }
 
+// dropStaleJJSeedAuthentication unlinks the authentication a jj slot left beside
+// its worktree, for the removal routes that never call vcs.RemoveWorktree - the
+// orphan and markerless ones - and so never reach the removal that normally does
+// it. Under the built-in layout the slot container took the file with it; a
+// worktree_path worktree outside the pool has only itself removed, and its state
+// entry is dropped in the same transaction, so nothing would ever look for the
+// file again. Left behind it is not inert: a later acquisition on that path
+// cannot seed, and the slot it leaves cannot be destroyed.
+//
+// BEST EFFORT, AND SAID OUT LOUD. A failure here is not fatal: the caller has
+// already deleted the worktree, so failing the removal would strand a slot that
+// is gone, and keeping its state entry so cleanup could be retried would make
+// every later operation fail during state healing. It is warned rather than
+// swallowed, and the leftover is not permanent either - the entry is keyed on
+// the worktree's own path, so gitvcs.PrepareJJSeededCleanup relinks over it and
+// the next acquisition there seeds normally.
+//
+// It acts only on an entry whose signed inventory validates, and
+// vcs.RemoveStaleJJSeedAuthentication verifies the file's own identity, and that
+// the workspace is really gone, before unlinking it. The shared directory is
+// deliberately left in place: pools that share it take independent state locks,
+// so no pool can prove it is unused.
+func dropStaleJJSeedAuthentication(poolDir string, wt WorktreeEntry) {
+	if !wt.SeedInventoryKnown || wt.SeedInventoryDigest == "" || wt.SeedBackend != "jj" || wt.SeedAuthIdentity == "" || len(wt.SeededPaths) == 0 {
+		return
+	}
+	key, err := readStateKey(poolDir)
+	if err != nil {
+		warnStaleJJSeedAuthentication(wt.Path, err)
+		return
+	}
+	if !validSeedInventoryDigest(key, wt) {
+		return
+	}
+	if err := vcs.RemoveStaleJJSeedAuthentication(wt.Path, wt.SeedAuthIdentity); err != nil {
+		warnStaleJJSeedAuthentication(wt.Path, err)
+	}
+}
+
+var warnStaleJJSeedAuthentication = func(worktreePath string, err error) {
+	fmt.Fprintf(os.Stderr, "treehouse: WARNING: could not remove the jj seed authentication left beside %s (%v); the worktree and its state entry are gone, and the next acquisition at that path relinks the leftover itself.\n", worktreePath, err)
+}
+
 func ownerAlive(wt WorktreeEntry) bool {
 	if wt.OwnerPID == 0 || wt.OwnerStartedAt == 0 {
 		return false
@@ -1038,11 +1157,15 @@ func sameDestroyReservation(current, reserved WorktreeEntry) bool {
 }
 
 func nextName(state State) string {
+	return strconv.Itoa(nextSlotNumber(state))
+}
+
+func nextSlotNumber(state State) int {
 	max := 0
 	for _, wt := range state.Worktrees {
 		if n, err := strconv.Atoi(wt.Name); err == nil && n > max {
 			max = n
 		}
 	}
-	return strconv.Itoa(max + 1)
+	return max + 1
 }

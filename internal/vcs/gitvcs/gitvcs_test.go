@@ -1013,6 +1013,74 @@ func TestPrepareJJSeededCleanupDoesNotClaimAdjacentUserFile(t *testing.T) {
 	assertTestFile(t, filepath.Dir(adjacent), filepath.Base(adjacent), "user data\n")
 }
 
+// TestPrepareJJSeededCleanupRelinksOverALeftoverEntry pins that a removed
+// workspace whose authentication was never unlinked does not make its path
+// unusable. The entry is keyed on the worktree path, so a leftover authenticates
+// nothing and the new workspace's marker replaces it.
+func TestPrepareJJSeededCleanupRelinksOverALeftoverEntry(t *testing.T) {
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	marker := filepath.Join(worktree, ".jj", "repo")
+	writeMarker := func(contents string) {
+		if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(marker, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeMarker("first store")
+	if err := PrepareJJSeededCleanup(worktree); err != nil {
+		t.Fatal(err)
+	}
+
+	// The workspace goes away with its authentication still linked - exactly what
+	// a cleanup failure on the removal routes leaves behind.
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatal(err)
+	}
+	authPath := jjSeedAuthenticationPath(worktree)
+	if _, err := os.Stat(authPath); err != nil {
+		t.Fatalf("no leftover entry, so this test proves nothing: %v", err)
+	}
+
+	writeMarker("second store")
+	if err := PrepareJJSeededCleanup(worktree); err != nil {
+		t.Fatalf("PrepareJJSeededCleanup refused a path holding a leftover entry: %v", err)
+	}
+	if err := AuthenticateJJSeededCleanup(worktree); err != nil {
+		t.Fatalf("the relinked entry does not authenticate the new workspace: %v", err)
+	}
+}
+
+// TestPrepareJJSeededCleanupRefusesAnOccupiedNonEntry keeps the relink narrow: it
+// replaces a plain file treehouse could have written and nothing else.
+func TestPrepareJJSeededCleanupRefusesAnOccupiedNonEntry(t *testing.T) {
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	marker := filepath.Join(worktree, ".jj", "repo")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("store"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	authPath := jjSeedAuthenticationPath(worktree)
+	if err := os.MkdirAll(authPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := PrepareJJSeededCleanup(worktree)
+	if err == nil {
+		t.Fatal("expected an occupied path that is not an authentication entry to be refused")
+	}
+	if !strings.Contains(err.Error(), authPath) {
+		t.Errorf("error %q does not name %q", err, authPath)
+	}
+	if info, statErr := os.Lstat(authPath); statErr != nil || !info.IsDir() {
+		t.Errorf("the occupied path was not left alone: %v", statErr)
+	}
+}
+
 func TestRemoveJJSeedAuthenticationRejectsUnownedFile(t *testing.T) {
 	worktree := filepath.Join(t.TempDir(), "worktree")
 	marker := filepath.Join(worktree, ".jj", "repo")

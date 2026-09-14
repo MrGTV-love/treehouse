@@ -20,13 +20,14 @@ import (
 )
 
 var (
-	getLease       bool
-	getLeaseHolder string
-	getJSON        bool
-	getNoFetch     bool
-	getBase        string
-	getIncludeFile string
-	getUniqueLeaf  bool
+	getLease        bool
+	getLeaseHolder  string
+	getJSON         bool
+	getNoFetch      bool
+	getBase         string
+	getIncludeFile  string
+	getUniqueLeaf   bool
+	getWorktreePath string
 )
 
 // Process seams, overridable in tests, matching the pattern in internal/pool.
@@ -65,7 +66,18 @@ tooling that derives per-checkout identity from the working directory's last
 path segment sees every slot as the same checkout. Pass --unique-leaf, set
 TREEHOUSE_UNIQUE_LEAF, or set unique_leaf in treehouse.toml to name new slots
 "<repo>-<slot>" instead. It is off by default and applies only to slots
-treehouse creates from now on; worktrees already in the pool keep their paths.`,
+treehouse creates from now on; worktrees already in the pool keep their paths.
+
+New pool slots are placed at {pool}/{slot}/{repo}. Pass --worktree-path, set
+TREEHOUSE_WORKTREE_PATH, or set worktree_path in treehouse.toml to template that
+directory instead, for tooling that only works when a checkout sits at a
+particular location relative to something else. The template must contain {slot}
+and at least one of {pool} or {repo}; {repo_parent} is available too but does not
+count, because two repositories side by side expand it identically. A template
+supersedes --unique-leaf: it names every segment of the path including the leaf,
+so write {repo}-{slot} in it for a unique leaf. It applies only to slots
+treehouse creates from now on: worktrees already in the pool keep their recorded
+paths and are never moved.`,
 	RunE: getRunE,
 }
 
@@ -78,6 +90,7 @@ func init() {
 	getCmd.Flags().StringVar(&getBase, "base", "", "Branch to cut this worktree from, overriding base_branch in config (default: inferred from the repository)")
 	getCmd.Flags().StringVar(&getIncludeFile, "include-file", "", "Replace committed .worktreeinclude with this file (relative to the current directory)")
 	getCmd.Flags().BoolVar(&getUniqueLeaf, "unique-leaf", false, "Name a newly created worktree directory <repo>-<slot> instead of <repo>, overriding unique_leaf in config")
+	getCmd.Flags().StringVar(&getWorktreePath, "worktree-path", "", "Template for a newly created worktree's directory, overriding worktree_path in config (default: {pool}/{slot}/{repo})")
 	rootCmd.AddCommand(getCmd)
 }
 
@@ -122,6 +135,7 @@ func getRunE(cmd *cobra.Command, args []string) error {
 	acquireOpts := pool.AcquireOptions{
 		SkipFetch:       getNoFetch,
 		BaseBranch:      resolveRequestedBase(cfg),
+		WorktreePath:    config.ResolveWorktreePath(getWorktreePath, cfg),
 		IncludeManifest: manifest,
 		UniqueLeaf:      resolveUniqueLeaf(cmd, cfg),
 	}

@@ -172,7 +172,8 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 | `treehouse lease <name>`   | Durably lease an existing pool worktree in place, without touching its files or git state |
 | `treehouse enter <name>`   | Open a subshell in an existing worktree by name (the number from `status`), even if it is in use; pool state is left untouched |
 | `treehouse status`         | Show pool status (highlights leased and current worktrees) |
-| `treehouse return [path]`  | Release any lease and return a worktree only after verifying foreign processes stopped |
+| `treehouse return [path\|name]` | Release any lease and return a worktree only after verifying foreign processes stopped; the name is the number from `status` |
+| `treehouse return --all`   | Return every held worktree in the current repo pool |
 | `treehouse prune`          | Dry-run removal of stale idle worktrees in the current repo pool |
 | `treehouse prune --all`    | Dry-run removal of stale idle worktrees across every managed pool |
 | `treehouse destroy <path>` | Dry-run removal of one worktree (safe by default; `--yes` to execute) |
@@ -196,6 +197,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 | `enter`   | `--print-path` | Print only the worktree's absolute path to stdout instead of opening a subshell (for `cd "$(treehouse enter --print-path 1)"`) |
 | `status`  | `--json` | Print worktree status and lease metadata as JSON |
 | `return`  | `--force` | Clean, reset, and return without prompting |
+| `return`  | `--all`   | Return every held worktree in this repository's pool; leaves alone slots `status` reports `available` or `damaged`, and a `you're here` slot nobody else holds |
 | `return`  | `--if-lease-id` | Return only if the current lease has the expected per-acquisition identity |
 | `return`  | `--if-lease-holder` | Return only if the current lease has the expected holder |
 | `prune`   | `--yes`   | Delete listed prune candidates instead of doing a dry run |
@@ -286,6 +288,45 @@ If process termination or that verification fails, the command exits nonzero and
 A non-interactive dirty return aborts without cleaning: prune will not reclaim that slot. Retry by pasting the printed `treehouse return --force <quoted-path>` hint (shell-quoted so copy-paste does not expand metacharacters). `--force` with no path only works from inside a repository.
 When you pass an explicit path, `treehouse return` can run from outside the repository because it resolves the managed pool from that worktree path.
 
+#### Naming the worktree
+
+`treehouse return` accepts the same worktree **name** `treehouse status` prints in its first column, and `treehouse lease` and `treehouse enter` already take - so what you read off `status` can be returned without transcribing a path:
+
+```sh
+treehouse status
+# 1     leased       ~/.treehouse/myrepo-a1b2c3/1/myrepo  (held by agent-a)
+# 3     available    ~/.treehouse/myrepo-a1b2c3/3/myrepo
+treehouse return 1
+```
+
+A name is the slot's own identity and belongs to it for its whole lifetime; it is not a position in the listing, so it does not move when another slot is created or destroyed. Because a name means nothing outside the pool that issued it, it is resolved against the pool of the repository you are standing in - unlike a path, which finds its own pool and works from anywhere.
+
+An argument is read as a path first and only then as a name, so every argument that resolves today keeps resolving to exactly the same worktree. An argument holding a path separator is a path and only a path: its failure keeps reporting the path diagnosis rather than a misleading "no worktree named".
+
+#### Returning everything at once
+
+`treehouse return --all` returns every **held** worktree in the current repository's pool:
+
+```sh
+treehouse return --all
+# 🌳 Returning 1 (leased) at ~/.treehouse/myrepo-a1b2c3/1/myrepo
+# 🌳 Returning 2 (in-use) at ~/.treehouse/myrepo-a1b2c3/2/myrepo
+# 🌳 Returned 2 of 2 held worktree(s); 0 skipped; 1 not held.
+```
+
+Held means somebody has the slot: `leased`, `in-use`, `dirty`, `unverified`, and `you're here` when the slot is any of those underneath. Three kinds of slot are left alone. An `available` slot has nothing to return. A `damaged` slot's marker is missing or unreadable, so neither the detach nor the reset a return performs can be judged safe - `treehouse destroy`, which `status` spells out for such a slot, is what removes it. And a slot reported `you're here` that is otherwise parked, clean and quiet is held by nobody: your own shell standing in it is the only reason `status` does not call it available, and `treehouse enter` is documented to leave pool state untouched, so `--all` must not reset it either.
+
+Naming any of them explicitly still returns it, including a bare `treehouse return` from inside the slot you are standing in: the narrow target is a deliberate act, while the bulk one must not surprise.
+
+This target set is deliberately wider than the other bulk verbs. `prune` never touches a leased slot, and `destroy` removes one only when its exact path is named with `--include-leased`; `--all` clears leased and in-use slots. Those verbs delete a worktree, while a return keeps it in the pool, and reclaiming a whole pool whose agents are gone is what the verb is for. Terminate the agents first if they are still working.
+
+Two outcomes are reported as **skipped**, count against neither the returns nor the failures, and leave the slot exactly as it was:
+
+- **No longer the acquisition the listing saw.** `--all` lists the pool once and then works through it, so an earlier confirmation can hold the run open while a later slot changes state. Each release is pinned to the lease the listing saw: a slot that was leased is refused unless that same lease is still on it - whether it was handed to someone else or simply returned in the meantime - and a slot that was not leased is refused if it has been leased since. The report says only that the slot is no longer the acquisition the run listed, because the lease identity is all that was compared. That is also the whole guarantee: a slot handed to another plain `treehouse get` carries no lease to compare, so it is returned like any other in-use slot, which is what `--all` does to in-use slots by design.
+- **Quarantined.** A state version bump or a rotated state key leaves an entry whose seed inventory can no longer be authenticated, and no return may clear it. A whole pool can land in this state at once; the run reports each slot and points at `treehouse destroy --include-leased`. Such a slot is refused before the dirty confirmation, so `--all` never offers to discard changes it cannot then discard.
+
+Each worktree is returned exactly as naming it would be, including the confirmation before uncommitted changes are discarded. Declining one - or failing to return one - never stops the worktrees after it, and the summary names every slot that was left behind. `--all` takes no path or name, and cannot be combined with `--if-lease-id` or `--if-lease-holder`, which identify a single acquisition.
+
 `treehouse return` exits 0 only when the worktree was actually returned:
 
 | Exit | Meaning |
@@ -293,6 +334,8 @@ When you pass an explicit path, `treehouse return` can run from outside the repo
 | `0`  | The worktree was returned and any lease on it was released |
 | `1`  | The return failed: unmet lease conditions, process termination, or reset |
 | `3`  | The worktree was not returned, and is exactly as it was found: it has uncommitted changes and cleaning was declined, or the confirmation could not be answered |
+
+`--all` reports the same statuses for the whole run: `0` when every held worktree was returned or skipped, `3` when the only thing that stopped a return was an abort, and `1` when any worktree failed. A skip is never a failure: nothing went wrong, so a retry would only report it again. A run in which every held slot was skipped still exits `0` and leaves the pool exactly as it was - nothing it set out to return was still there to return. A failure outranks an abort because the two need opposite responses - retry one, clean or `--force` the other.
 
 `treehouse get` uses the same exit `3` when its subshell exits and leaves the worktree dirty, because it leaks the slot the same way: the worktree stays dirty, so a later `get` skips it and `prune` will not reclaim it. Exiting a `get` subshell while another session holds a durable lease on that slot is not this case and still exits 0, because a leased slot was never that session's to return.
 
@@ -563,7 +606,7 @@ Pooled jj workspaces inherit the opt-in from their main repository root, so an u
 
 The backend is resolved on every command, and existing pool slots keep the flavor they were created with: changing the opt-in does not convert worktrees already in the pool.
 `destroy` and `prune` handle each slot by its own flavor (its `.git` or `.jj` marker), so a git worktree is still cleanly deregistered from git even after opting the repository into jj, and vice versa.
-A slot whose marker is missing entirely (a damaged slot) is never reused, reset, or detached; `treehouse status` reports it as `damaged`, `treehouse return` only clears its lease, `treehouse lease` still protects it but reports an empty `base_branch` rather than reading one through a fallback backend, `prune` reports it as unverifiable, and `treehouse destroy <path> --include-unlanded` removes it.
+A slot whose marker is missing entirely (a damaged slot) is never reused, reset, or detached; `treehouse status` reports it as `damaged` even when you are standing in it, `treehouse return <path>` only clears its lease (and [`--all` leaves it alone](#returning-everything-at-once)), `treehouse lease` still protects it but reports an empty `base_branch` rather than reading one through a fallback backend, `prune` reports it as unverifiable, and `treehouse destroy <path> --include-unlanded` removes it.
 `treehouse get` is flavor-aware too: it only reuses slots matching the backend the repository currently selects, and creates new slots with that backend, so a caller who opted in to jj is never handed a git worktree (or vice versa).
 Old-flavor slots stay in the pool untouched — `treehouse status` marks them and they count toward `max_trees` — until you migrate them: `treehouse destroy` the old slots and re-acquire with `treehouse get`.
 

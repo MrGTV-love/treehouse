@@ -62,6 +62,12 @@ type WorktreeStatus struct {
 	// instead of leaving Branch empty, so a read failure is never mistaken for
 	// a detached HEAD.
 	BranchErr string
+	// HeldOnlyByCwd reports a StatusHere slot that nobody is actually holding:
+	// it is unleased, idle, clean, quiet and undamaged, and the only reason it
+	// is not reported available is that the caller is standing in it. Status
+	// alone cannot answer that, because StatusHere hides whichever
+	// classification the slot would otherwise have carried.
+	HeldOnlyByCwd bool
 }
 
 // LeaseInfo is the stable machine-readable identity of one lease acquisition.
@@ -704,11 +710,45 @@ var ErrLeasePreconditionFailed = errors.New("lease precondition failed")
 // calling process's own short-lived owner reservation.
 var ErrOwnerPreconditionFailed = errors.New("owner precondition failed")
 
+// ErrInvalidReleasePreconditions reports preconditions no worktree could ever
+// satisfy: an empty ExpectedLeaseID, or RequireUnleased asked for alongside a
+// lease identity or holder. It describes the CALL, not the worktree, so it is a
+// programming error to surface loudly rather than one of the states a release
+// classifies and skips.
+var ErrInvalidReleasePreconditions = errors.New("invalid release preconditions")
+
+// ErrSeedInventoryUntrusted reports that a worktree is quarantined: its seed
+// inventory could not be authenticated, so no release may clear it. A state
+// version bump or a rotated state key puts a whole pool in this state at once,
+// which is why callers classify it with errors.Is: a bulk return has to report
+// such a slot as skipped rather than as a failure it should retry forever.
+var ErrSeedInventoryUntrusted = errors.New("untrusted seed inventory")
+
 // ReleasePreconditions optionally constrain a release to the current lease.
 // Pointer fields distinguish an omitted condition from an expected empty value.
+//
+// The two things a caller can assert about a lease are separate fields, not two
+// readings of one value: "still exactly this acquisition" and "still nobody's"
+// are opposite predicates, and a single field carrying both would read
+// correctly and behave oppositely the day a caller passes an identity variable
+// that happens to be empty. They cannot be combined, and an empty
+// ExpectedLeaseID is a programming error rather than the other predicate in
+// disguise - both are rejected with ErrInvalidReleasePreconditions.
 type ReleasePreconditions struct {
-	ExpectedLeaseID     *string
+	// ExpectedLeaseID requires the worktree to still carry EXACTLY this lease
+	// identity, so a release that names one acquisition can never act on a
+	// later one. Nil omits the condition. The empty string is not an identity
+	// any acquisition can have; use RequireUnleased to assert the absence of a
+	// lease.
+	ExpectedLeaseID *string
+	// ExpectedLeaseHolder requires the current lease to carry this holder. Like
+	// ExpectedLeaseID it asserts that a lease EXISTS, so it refuses an unleased
+	// worktree.
 	ExpectedLeaseHolder *string
+	// RequireUnleased requires the worktree to still carry NO lease. It is what
+	// an observation of an unleased slot replays: a bulk release that set out
+	// to reclaim a slot nobody had leased must refuse it once somebody has.
+	RequireUnleased bool
 	// RequireOwnedByCaller limits the release to a worktree that still carries
 	// the calling process's own owner reservation, which is what an acquiring
 	// `treehouse get` holds until it returns the slot. Without it, a session
@@ -726,8 +766,13 @@ func Release(poolDir, worktreePath string) error {
 }
 
 // ValidateReleasePreconditions checks that a managed worktree still matches
-// the requested lease, then runs guarded (when non-nil) while still holding the
-// state lock. No release effects are performed either way.
+// the requested lease AND that a release of it is possible at all, then runs
+// guarded (when non-nil) while still holding the state lock. No release effects
+// are performed either way.
+//
+// It shares releasableWorktree with ReleaseConditional, so the two always agree:
+// a caller that passes here is refused later only by something that changed
+// since, never by a condition the release knew about all along.
 //
 // guarded is how a caller performs a worktree action that must not run on a slot
 // someone else has taken over - get's exit-time detach, which would move the
@@ -751,7 +796,8 @@ func ValidateReleasePreconditions(poolDir, worktreePath string, preconditions Re
 	})
 }
 
-// ReleaseConditional verifies any lease preconditions, runs beforeReset, resets
+// ReleaseConditional verifies any lease preconditions and the quarantine state
+// (both through releasableWorktree, under the lock), runs beforeReset, resets
 // the worktree, and clears its reservation while holding one state lock. The
 // callback is invoked only after all preconditions match and runs under that
 // lock so caller-side termination or detachment cannot race a later acquisition.
@@ -784,11 +830,6 @@ func ReleaseConditional(poolDir, worktreePath, baseBranch string, preconditions 
 		wt, err := releasableWorktree(&state, worktreePath, preconditions)
 		if err != nil {
 			return err
-		}
-		// Clearing a safety quarantine without a trusted seed inventory could
-		// expose ignored files hidden by a mutable manifest.
-		if !wt.SeedInventoryKnown {
-			return fmt.Errorf("worktree %s is quarantined without a trusted seed inventory; inspect it and use destroy --include-leased instead", worktreePath)
 		}
 		branch, fallback, requested := "", "", ""
 		if !markerless {
@@ -851,9 +892,32 @@ func releasableWorktree(state *State, worktreePath string, preconditions Release
 		if err := validateReleasePreconditions(*wt, preconditions); err != nil {
 			return nil, err
 		}
+		// Clearing a safety quarantine without a trusted seed inventory could
+		// expose ignored files hidden by a mutable manifest. It is judged here,
+		// with the preconditions, so that every caller learns a release is
+		// impossible BEFORE it prepares one: `return` would otherwise offer to
+		// discard a worktree's uncommitted changes and then refuse it anyway.
+		// It is judged AFTER the preconditions so a caller that named a lease,
+		// or `get` confirming its own reservation, still gets the answer to the
+		// question it asked.
+		if !wt.SeedInventoryKnown {
+			return nil, fmt.Errorf("%w: worktree %s is quarantined without a trusted seed inventory; inspect it and use destroy --include-leased instead", ErrSeedInventoryUntrusted, worktreePath)
+		}
 		return wt, nil
 	}
 	return nil, fmt.Errorf("worktree %s is not managed by treehouse", worktreePath)
+}
+
+// check rejects preconditions that describe no reachable worktree state, before
+// any state is read and long before anything is released.
+func (p ReleasePreconditions) check() error {
+	if p.RequireUnleased && (p.ExpectedLeaseID != nil || p.ExpectedLeaseHolder != nil) {
+		return fmt.Errorf("%w: RequireUnleased asserts the worktree carries no lease and cannot be combined with an expected lease identity or holder", ErrInvalidReleasePreconditions)
+	}
+	if p.ExpectedLeaseID != nil && *p.ExpectedLeaseID == "" {
+		return fmt.Errorf("%w: the empty string is not a lease identity; use RequireUnleased to require that the worktree carries no lease", ErrInvalidReleasePreconditions)
+	}
+	return nil
 }
 
 func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePreconditions) error {
@@ -861,6 +925,15 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 		if err := checkOwnedByCaller(wt); err != nil {
 			return err
 		}
+	}
+	if err := preconditions.check(); err != nil {
+		return err
+	}
+	if preconditions.RequireUnleased {
+		if wt.Leased {
+			return fmt.Errorf("%w: worktree %s was observed unleased and is leased now", ErrLeasePreconditionFailed, wt.Path)
+		}
+		return nil
 	}
 	if preconditions.ExpectedLeaseID == nil && preconditions.ExpectedLeaseHolder == nil {
 		return nil
@@ -953,23 +1026,41 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 			if branchErr != nil {
 				ws.BranchErr = branchErr.Error()
 			}
-			if wt.Leased {
+			// The slot is classified WITHOUT the cwd, which is then laid over
+			// the answer. The ranking the operator sees is unchanged - leased
+			// and a live owner reservation still outrank "you're here", and it
+			// still outranks everything below - but the classification it hides
+			// is now known, so a caller can tell a slot somebody holds from one
+			// whose only claim is the shell standing in it.
+			owned := ownerAlive(wt)
+			switch {
+			case wt.Leased:
 				ws.Status = StatusLeased
 				ws.LeaseID = wt.LeaseID
 				ws.LeaseHolder = wt.LeaseHolder
 				ws.LeasedAt = wt.LeasedAt
-			} else if ownerAlive(wt) {
+			case owned:
 				ws.Status = StatusInUse
-			} else if process.WorktreeContainsCwd(wt.Path, cwd) {
-				ws.Status = StatusHere
-			} else if scanErr != nil {
+			case scanErr != nil:
 				ws.Status = StatusUnverified
-			} else if len(procs) > 0 {
+			case len(procs) > 0:
 				ws.Status = StatusInUse
-			} else if ws.Flavor == "" {
+			case ws.Flavor == "":
 				ws.Status = StatusDamaged
-			} else if dirty, _ := vcs.IsDirty(wt.Path); dirty {
-				ws.Status = StatusDirty
+			default:
+				if dirty, _ := vcs.IsDirty(wt.Path); dirty {
+					ws.Status = StatusDirty
+				}
+			}
+			// Damaged is not overlaid. A missing marker is a different kind of
+			// fact from the reservations above: it says the slot's own contents
+			// cannot be judged at all, which is what `destroy` - not `return` -
+			// answers, and standing in such a slot does not make it any more
+			// readable. The recovery-scan case below already forces damaged
+			// back over the overlay for exactly this reason.
+			if !wt.Leased && !owned && ws.Status != StatusDamaged && process.WorktreeContainsCwd(wt.Path, cwd) {
+				ws.HeldOnlyByCwd = ws.Status == StatusAvailable
+				ws.Status = StatusHere
 			}
 
 			// A slot the recovery scan could not inspect (its marker exists but
@@ -989,6 +1080,28 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 	})
 
 	return result, err
+}
+
+// FindByName returns the pool entry registered under name, or nil when this
+// pool has no such slot. The name is the identity `treehouse status` prints in
+// its first column and `treehouse lease <name>` already accepts: it belongs to
+// the slot for the slot's whole lifetime, unlike a position in a listing, which
+// moves whenever another slot is created or destroyed. Lookup is by exact
+// match, and a pool never registers two slots under one name.
+//
+// Unlike a path, a name is meaningful only inside the pool that issued it, so
+// callers must resolve the pool from the repository first.
+func FindByName(poolDir, name string) (*WorktreeEntry, error) {
+	state, err := ReadState(poolDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, wt := range state.Worktrees {
+		if wt.Name == name {
+			return &wt, nil
+		}
+	}
+	return nil, nil
 }
 
 func FindByPath(poolDir, path string) (*WorktreeEntry, error) {

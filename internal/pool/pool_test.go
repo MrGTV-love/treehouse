@@ -15,9 +15,231 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/treehouse/internal/config"
 	"github.com/kunchenguid/treehouse/internal/process"
+	"github.com/kunchenguid/treehouse/internal/vcs"
 	"github.com/kunchenguid/treehouse/internal/vcs/gitvcs"
 )
+
+// setupSharedClonePool mirrors the report's two same-named clones of one
+// origin. Keep real pool resolution in the fixture: the pool stays shared.
+func setupSharedClonePool(t *testing.T) (cloneA, cloneB, poolDir string) {
+	t.Helper()
+	t.Setenv("TREEHOUSE_VCS", "git")
+	cloneA, _ = setupRepo(t)
+	base := filepath.Dir(cloneA)
+	cloneB = filepath.Join(base, "other", filepath.Base(cloneA))
+	runGit(t, "", "clone", filepath.Join(base, "remote.git"), cloneB)
+	root := filepath.Join(base, "shared")
+	poolDir, err := config.ResolvePoolDir(cloneA, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPool, err := config.ResolvePoolDir(cloneB, root)
+	if err != nil || otherPool != poolDir {
+		t.Fatalf("same-origin clones must still resolve one pool: %q != %q (%v)", otherPool, poolDir, err)
+	}
+	return cloneA, cloneB, poolDir
+}
+
+func assertCloneCommonDir(t *testing.T, slot, repo string) {
+	t.Helper()
+	physical := func(path string) string {
+		t.Helper()
+		common, err := vcs.CommonGitDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		common, err = filepath.EvalSymlinks(common)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return common
+	}
+	if got, want := physical(slot), physical(repo); got != want {
+		t.Fatalf("slot %s belongs to %s, want requesting clone %s", slot, got, want)
+	}
+}
+
+func TestAcquire_CloneIdentity(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased=%t", leased), func(t *testing.T) {
+			cloneA, cloneB, poolDir := setupSharedClonePool(t)
+			paths := make(map[string]string)
+			// A reuses its slot before B arrives; then both clones must keep
+			// reusing their own slot, despite the shared origin and pool.
+			for _, repo := range []string{cloneA, cloneA, cloneB, cloneA, cloneB} {
+				var path string
+				var err error
+				if leased {
+					path, err = AcquireLease(repo, poolDir, 2, nil, "clone-test")
+				} else {
+					path, err = Acquire(repo, poolDir, 2, nil)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertCloneCommonDir(t, path, repo)
+				if previous, ok := paths[repo]; ok && path != previous {
+					t.Fatalf("same-clone reuse changed path: %s -> %s", previous, path)
+				}
+				paths[repo] = path
+				if err := Release(poolDir, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if paths[cloneA] == paths[cloneB] {
+				t.Fatalf("different clones exchanged slot %s", paths[cloneA])
+			}
+		})
+	}
+}
+
+func TestAcquire_CloneIdentityCapacity(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased=%t", leased), func(t *testing.T) {
+			cloneA, cloneB, poolDir := setupSharedClonePool(t)
+			path, err := Acquire(cloneA, poolDir, 1, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Release(poolDir, path); err != nil {
+				t.Fatal(err)
+			}
+			before, err := ReadState(poolDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			if leased {
+				got, err = AcquireLease(cloneB, poolDir, 1, nil, "clone-b")
+			} else {
+				got, err = Acquire(cloneB, poolDir, 1, nil)
+			}
+			if err == nil || !strings.Contains(err.Error(), "max_trees = 1") || !strings.Contains(err.Error(), "1 belong to another clone") || got != "" {
+				t.Fatalf("expected explicit capacity failure, got path=%q err=%v", got, err)
+			}
+			after, err := ReadState(poolDir)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("capacity failure changed existing state: %#v -> %#v (%v)", before, after, err)
+			}
+			assertCloneCommonDir(t, path, cloneA)
+			if content, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(content) != "hi\n" {
+				t.Fatalf("foreign slot was removed or changed: %q (%v)", content, err)
+			}
+			if reused, err := Acquire(cloneA, poolDir, 1, nil); err != nil || reused != path {
+				t.Fatalf("owning clone could not reuse preserved slot: %q (%v)", reused, err)
+			}
+		})
+	}
+}
+
+func TestAcquire_CloneIdentitySymlinkAlias(t *testing.T) {
+	repo, poolDir := setupRepo(t)
+	alias := filepath.Join(filepath.Dir(repo), "alias")
+	if err := os.Symlink(repo, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	path, err := Acquire(repo, poolDir, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(poolDir, path); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise an alias in the slot's metadata as well as in the caller's
+	// path. Git versions may themselves canonicalize one or both spellings.
+	cmd := exec.Command("git", "rev-parse", "--absolute-git-dir")
+	cmd.Dir = path
+	gitDir, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonAlias := filepath.Join(alias, ".git")
+	if err := os.WriteFile(filepath.Join(strings.TrimSpace(string(gitDir)), "commondir"), []byte(commonAlias+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, requester := range []string{repo, alias} {
+		reused, err := Acquire(requester, poolDir, 1, nil)
+		if err != nil || reused != path {
+			t.Fatalf("physical clone alias must reuse %s: %q (%v)", path, reused, err)
+		}
+		if err := Release(poolDir, reused); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestAcquire_CloneIdentityUnreadableCandidate(t *testing.T) {
+	repo, poolDir := setupRepo(t)
+	path, err := Acquire(repo, poolDir, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(poolDir, path); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the slot and its marker, but make its Git identity unresolvable.
+	marker := []byte("gitdir: " + filepath.Join(filepath.Dir(repo), "missing.git") + "\n")
+	if err := os.WriteFile(filepath.Join(path, ".git"), marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vcs.CommonGitDir(path); err == nil {
+		t.Fatal("expected unreadable candidate identity")
+	}
+	if _, err := acquisitionCommonGitDir(path); err == nil {
+		t.Fatal("unreadable Git identity must be an error, not an unsupported backend")
+	}
+	before, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := Acquire(repo, poolDir, 2, nil)
+	if err != nil || fresh == path {
+		t.Fatalf("unreadable candidate must be skipped: %q (%v)", fresh, err)
+	}
+	assertCloneCommonDir(t, fresh, repo)
+	after, err := ReadState(poolDir)
+	if err != nil || len(after.Worktrees) != 2 || !reflect.DeepEqual(before.Worktrees[0], after.Worktrees[0]) {
+		t.Fatalf("unreadable candidate state changed: %#v (%v)", after, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(path, ".git")); err != nil || string(got) != string(marker) {
+		t.Fatalf("unreadable candidate marker changed: %q (%v)", got, err)
+	}
+}
+
+func TestRelease_CloneIdentityExistingState(t *testing.T) {
+	repo, poolDir := setupRepo(t)
+	path := filepath.Join(poolDir, "7", filepath.Base(repo))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := vcs.AddWorktree(repo, path, "main"); err != nil {
+		t.Fatal(err)
+	}
+	// Existing state has no persisted clone identity. Seed authentication is
+	// still required, exactly as it was before clone-aware selection.
+	entry := WorktreeEntry{Name: "7", Path: path, CreatedAt: time.Now(), Leased: true}
+	setSeedInventory(&entry, []string{}, true)
+	if err := WriteState(poolDir, State{Worktrees: []WorktreeEntry{entry}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, find := range []func() (*WorktreeEntry, error){
+		func() (*WorktreeEntry, error) { return FindByName(poolDir, "7") },
+		func() (*WorktreeEntry, error) { return FindByPath(poolDir, path) },
+	} {
+		found, err := find()
+		if err != nil || found == nil || found.Path != path {
+			t.Fatalf("existing slot no longer resolves: %#v (%v)", found, err)
+		}
+	}
+	if err := Release(poolDir, path); err != nil {
+		t.Fatalf("return of existing slot failed: %v", err)
+	}
+	if reused, err := Acquire(repo, poolDir, 1, nil); err != nil || reused != path {
+		t.Fatalf("existing slot no longer reusable by its clone: %q (%v)", reused, err)
+	}
+}
 
 func setupRepo(t *testing.T) (repoDir, poolDir string) {
 	t.Helper()

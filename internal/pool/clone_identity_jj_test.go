@@ -96,7 +96,7 @@ func TestAcquireColocatedJJCloneIdentity(t *testing.T) {
 	}
 }
 
-func TestAcquireNonColocatedJJStillReuses(t *testing.T) {
+func TestAcquireNonColocatedJJRefusesReuse(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
 		leased bool
@@ -108,15 +108,32 @@ func TestAcquireNonColocatedJJStillReuses(t *testing.T) {
 			if _, err := os.Lstat(filepath.Join(repo, ".git")); !os.IsNotExist(err) {
 				t.Fatalf("fixture must be non-colocated, .git inspection returned %v", err)
 			}
-			if identity, err := acquisitionCommonGitDir(repo); err != nil || identity != "" {
-				t.Fatalf("non-colocated jj identity = %q, %v; want empty unsupported identity without error", identity, err)
+			if identity, err := acquisitionCommonGitDir(repo); err == nil {
+				t.Fatalf("non-colocated jj identity = %q without error; unprovable identity must not match", identity)
 			}
 			slot := acquireJJCloneIdentity(t, repo, poolDir, 1, mode.leased)
 			if err := Release(poolDir, slot); err != nil {
 				t.Fatal(err)
 			}
-			if got := acquireJJCloneIdentity(t, repo, poolDir, 1, mode.leased); got != slot {
-				t.Fatalf("non-colocated jj reused %s, want %s", got, slot)
+			before, err := ReadState(poolDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			if mode.leased {
+				got, err = AcquireLease(repo, poolDir, 1, nil, "clone identity test")
+			} else {
+				got, err = Acquire(repo, poolDir, 1, nil)
+			}
+			if err == nil || got != "" || !strings.Contains(err.Error(), "1 whose clone identity cannot be verified; max_trees = 1") || !strings.Contains(err.Error(), "this repository's clone identity cannot be verified") {
+				t.Fatalf("non-colocated jj got path=%q err=%v, want explicit unverifiable-identity exhaustion", got, err)
+			}
+			after, err := ReadState(poolDir)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("refused reuse changed state: %#v -> %#v (%v)", before, after, err)
+			}
+			if fresh := acquireJJCloneIdentity(t, repo, poolDir, 2, mode.leased); fresh == slot {
+				t.Fatalf("non-colocated jj reused unverifiable workspace %s", slot)
 			}
 		})
 	}
@@ -180,8 +197,8 @@ func TestAcquireNonColocatedJJRefusesIdentifiableWorkspace(t *testing.T) {
 		} else {
 			got, err = Acquire(jjOnly, poolDir, 1, nil)
 		}
-		if err == nil || got != "" || !strings.Contains(err.Error(), "1 belong to another clone") {
-			t.Fatalf("leased=%t: non-colocated requester got path=%q err=%v, want explicit other-clone exhaustion", leased, got, err)
+		if err == nil || got != "" || !strings.Contains(err.Error(), "1 whose clone identity cannot be verified") {
+			t.Fatalf("leased=%t: non-colocated requester got path=%q err=%v, want explicit unverifiable-identity exhaustion", leased, got, err)
 		}
 	}
 
@@ -195,29 +212,50 @@ func TestAcquireNonColocatedJJRefusesIdentifiableWorkspace(t *testing.T) {
 	if got := acquireJJCloneIdentity(t, colocated, poolDir, 2, true); got != slot {
 		t.Fatalf("colocated clone reused %s, want its own workspace %s", got, slot)
 	}
-	if got := acquireJJCloneIdentity(t, jjOnly, poolDir, 2, true); got != own {
-		t.Fatalf("non-colocated clone reused %s, want its own workspace %s", got, own)
+	if got, err := AcquireLease(jjOnly, poolDir, 2, nil, "clone identity test"); err == nil || got != "" || !strings.Contains(err.Error(), "1 whose clone identity cannot be verified; max_trees = 2") {
+		t.Fatalf("non-colocated clone got path=%q err=%v, want refusal: its identity cannot be proven, so it reuses nothing", got, err)
 	}
 }
 
-func TestAcquireSecondNonColocatedJJCloneSharesUnidentifiableClass(t *testing.T) {
+func TestAcquireSecondNonColocatedJJCloneRefusedForeignWorkspace(t *testing.T) {
 	origin, poolDir := setupJJCloneIdentity(t)
 	base := filepath.Dir(poolDir)
 	first := filepath.Join(base, "jj-first")
 	second := filepath.Join(base, "jj-second")
 	runJJCloneIdentity(t, "git", "clone", origin, first)
 	runJJCloneIdentity(t, "git", "clone", origin, second)
-	for _, repo := range []string{first, second} {
-		if identity, err := acquisitionCommonGitDir(repo); err != nil || identity != "" {
-			t.Fatalf("%s identity = %q, %v; want empty unsupported identity", repo, identity, err)
-		}
-	}
 
 	slot := acquireJJCloneIdentity(t, first, poolDir, 1, false)
 	if err := Release(poolDir, slot); err != nil {
 		t.Fatal(err)
 	}
-	if got := acquireJJCloneIdentity(t, second, poolDir, 1, true); got != slot {
-		t.Fatalf("second non-colocated clone got %s, want the unidentifiable workspace %s to stay eligible", got, slot)
+	before, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leased := range []bool{false, true} {
+		var got string
+		if leased {
+			got, err = AcquireLease(second, poolDir, 1, nil, "clone identity test")
+		} else {
+			got, err = Acquire(second, poolDir, 1, nil)
+		}
+		if err == nil || got != "" || !strings.Contains(err.Error(), "1 whose clone identity cannot be verified; max_trees = 1") {
+			t.Fatalf("leased=%t: second clone got path=%q err=%v, want explicit refusal of the first clone's workspace", leased, got, err)
+		}
+	}
+	after, err := ReadState(poolDir)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("refusal changed state: %#v -> %#v (%v)", before, after, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(slot, "README.md")); err != nil || string(got) != "hi\n" {
+		t.Fatalf("first clone's workspace changed: README = %q, %v", got, err)
+	}
+	mainRoot, err := vcs.FindMainRepoRootFrom(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, err := filepath.EvalSymlinks(first); err != nil || mainRoot != want {
+		t.Fatalf("workspace %s now belongs to %s, want %s (%v)", slot, mainRoot, want, err)
 	}
 }

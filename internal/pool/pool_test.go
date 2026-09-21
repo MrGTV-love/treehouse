@@ -194,6 +194,9 @@ func TestAcquire_CloneIdentityUnreadableCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got, err := Acquire(repo, poolDir, 1, nil); err == nil || got != "" || !strings.Contains(err.Error(), "0 belong to another clone; 1 whose clone identity cannot be verified; max_trees = 1") {
+		t.Fatalf("expected unverifiable-identity capacity failure, got path=%q err=%v", got, err)
+	}
 	fresh, err := Acquire(repo, poolDir, 2, nil)
 	if err != nil || fresh == path {
 		t.Fatalf("unreadable candidate must be skipped: %q (%v)", fresh, err)

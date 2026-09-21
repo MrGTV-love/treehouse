@@ -336,20 +336,10 @@ func freeTemplatedSlot(repoRoot, poolDir string, state State, poolSize int, opts
 		len(occupied), occupied[0], occupied[len(occupied)-1], repoRoot)
 }
 
-// acquisitionCommonGitDir returns a physical clone identity. An empty identity
-// is supported only for non-colocated jj, whose backend has no common Git dir;
-// preserve its existing allocation behavior rather than disabling all reuse.
-// Failure to read an identity on Git or colocated jj is still an error.
+// acquisitionCommonGitDir returns a physical clone identity. A clone without
+// one (including non-colocated jj, which has no common Git dir) is an error:
+// ownership that cannot be proven is never treated as a match.
 func acquisitionCommonGitDir(dir string) (string, error) {
-	if vcs.BackendNameFor(dir) == "jj" {
-		mainRoot, err := vcs.FindMainRepoRootFrom(dir)
-		if err != nil {
-			return "", err
-		}
-		if _, err := os.Lstat(filepath.Join(mainRoot, ".git")); os.IsNotExist(err) {
-			return "", nil
-		}
-	}
 	commonDir, err := vcs.CommonGitDir(dir)
 	if err != nil {
 		return "", err
@@ -389,10 +379,8 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	if err != nil {
 		return LeaseInfo{}, err
 	}
-	commonDir, err := acquisitionCommonGitDir(repoRoot)
-	if err != nil {
-		return LeaseInfo{}, fmt.Errorf("cannot resolve requesting repository's Git common directory: %w", err)
-	}
+	// An unverifiable requester identity disables reuse, not allocation.
+	commonDir, identityErr := acquisitionCommonGitDir(repoRoot)
 
 	var acquired LeaseInfo
 	var runPostCreate bool
@@ -435,6 +423,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		wantFlavor := vcs.BackendNameFor(repoRoot)
 		otherFlavor := 0
 		otherClone := 0
+		unverifiedClone := 0
 		for i, wt := range state.Worktrees {
 			if wt.Destroying || wt.Leased || ownerAlive(wt) {
 				continue
@@ -458,11 +447,15 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			}
 			// Pools are shared by origin URL, but a linked worktree still
 			// belongs to one physical clone. Never reset or acquire another
-			// clone's slot, even when both clones have identical refs.
-			// An empty identity (non-colocated jj) only matches another empty
-			// identity: an identifiable slot cannot be proven to be ours.
+			// clone's slot, even when both clones have identical refs, and
+			// never one whose owner (or our own identity) cannot be proven.
+			if identityErr != nil {
+				unverifiedClone++
+				continue
+			}
 			candidateDir, err := acquisitionCommonGitDir(wt.Path)
 			if err != nil {
+				unverifiedClone++
 				continue
 			}
 			if candidateDir != commonDir {
@@ -562,8 +555,12 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			if otherFlavor > 0 {
 				return fmt.Errorf("all %d worktrees are in use, dirty, or hold the other backend's worktrees (%d %s-flavored; the repository selects %s). Run 'treehouse status' to see details, destroy old-flavor worktrees to migrate the pool, or increase max_trees in treehouse.toml", len(state.Worktrees), otherFlavor, map[string]string{"git": "jj", "jj": "git"}[wantFlavor], wantFlavor)
 			}
-			if otherClone > 0 {
-				return fmt.Errorf("all %d worktrees are in use, dirty, or belong to another clone of this repository (%d belong to another clone; max_trees = %d). Another clone's worktrees are never reused. Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", len(state.Worktrees), otherClone, poolSize)
+			if otherClone > 0 || unverifiedClone > 0 {
+				msg := fmt.Sprintf("all %d worktrees are in use, dirty, or not provably this clone's (%d belong to another clone; %d whose clone identity cannot be verified; max_trees = %d). A worktree is reused only by the clone it belongs to", len(state.Worktrees), otherClone, unverifiedClone, poolSize)
+				if identityErr != nil {
+					msg += fmt.Sprintf(", and this repository's clone identity cannot be verified: %v", identityErr)
+				}
+				return fmt.Errorf("%s. Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", msg)
 			}
 			return fmt.Errorf("all %d worktrees are in use or dirty (max_trees = %d). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", len(state.Worktrees), poolSize)
 		}

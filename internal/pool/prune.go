@@ -409,14 +409,17 @@ func worktreePruneContextResolver() pruneContextResolver {
 		if context, ok := contexts[repoRoot]; ok {
 			return context, nil
 		}
+		// A fetch or default-ref failure still returns the resolved root, so
+		// destroy can report an other-flavor slot as a migration; the empty
+		// DefaultRef keeps that slot unverified.
 		if err, ok := contextErrors[repoRoot]; ok {
-			return pruneContext{}, err
+			return pruneContext{RepoRoot: repoRoot}, err
 		}
 
 		defaultRef, err := resolvePruneDefaultRef(repoRoot)
 		if err != nil {
 			contextErrors[repoRoot] = err
-			return pruneContext{}, err
+			return pruneContext{RepoRoot: repoRoot}, err
 		}
 		context := pruneContext{RepoRoot: repoRoot, DefaultRef: defaultRef}
 		contexts[repoRoot] = context

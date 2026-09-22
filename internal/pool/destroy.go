@@ -211,8 +211,8 @@ func planAndDestroy(poolDir string, targets []WorktreeEntry, allowLeased bool, o
 	var result DestroyResult
 	var removable []DestroyTarget
 	for _, wt := range targets {
-		// A resolution failure leaves the context empty, which classifyForDestroy
-		// reports as unverified rather than disposable.
+		// A resolution failure leaves the default ref empty, which
+		// classifyForDestroy reports as unverified rather than disposable.
 		context, _ := resolveContext(wt)
 		target := classifyForDestroy(wt, context.RepoRoot, context.DefaultRef)
 		measureDestroySize(poolDir, &target)

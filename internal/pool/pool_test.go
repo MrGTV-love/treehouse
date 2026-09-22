@@ -2223,6 +2223,37 @@ func TestDestroyPoolRemovesWorktreesOwnedByDifferentClones(t *testing.T) {
 	}
 }
 
+func TestWorktreePruneContextResolverKeepsRootWhenFetchFails(t *testing.T) {
+	repoA, poolDir, worktreeA, _ := acquireDisposableFromEachClone(t)
+	runGit(t, repoA, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing-origin"))
+	state, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry WorktreeEntry
+	for _, wt := range state.Worktrees {
+		if wt.Path == worktreeA {
+			entry = wt
+		}
+	}
+	wantRoot, err := resolvePoolRepoRoot(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolveContext := worktreePruneContextResolver()
+	// The second call reads the cached failure and must keep the root too.
+	for i := 0; i < 2; i++ {
+		context, err := resolveContext(entry)
+		if err == nil {
+			t.Fatalf("call %d: expected fetch failure, got context %#v", i, context)
+		}
+		if context.RepoRoot != wantRoot || context.DefaultRef != "" {
+			t.Fatalf("call %d: expected root %q with empty default ref, got %#v", i, wantRoot, context)
+		}
+	}
+}
+
 func TestDestroyPoolRefusesUnattributableWorktreePerPath(t *testing.T) {
 	_, poolDir, attributable, unattributable := acquireDisposableFromEachClone(t)
 	bogusGitDir := filepath.Join(t.TempDir(), "not-git-metadata")

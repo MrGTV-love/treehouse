@@ -391,34 +391,20 @@ func resolvePruneDefaultRef(repoRoot string) (string, error) {
 	return defaultRef, nil
 }
 
-func singleRepoPruneContextResolver(repoRoot string) pruneContextResolver {
-	var defaultRef string
-	var defaultErr error
-	resolved := false
-	return func(WorktreeEntry) (pruneContext, error) {
-		if !resolved {
-			ref, err := resolvePruneDefaultRef(repoRoot)
-			if err != nil {
-				defaultErr = err
-			} else {
-				defaultRef = ref
-			}
-			resolved = true
-		}
-		if defaultErr != nil {
-			return pruneContext{}, defaultErr
-		}
-		return pruneContext{RepoRoot: repoRoot, DefaultRef: defaultRef}, nil
-	}
+func singleRepoPruneContextResolver(_ string) pruneContextResolver {
+	// The pool may be shared by multiple clones, so the repository supplied by
+	// the caller cannot safely stand in for every managed worktree. Resolve each
+	// slot from its own path, just like repository-independent prune does.
+	return worktreePruneContextResolver()
 }
 
 func worktreePruneContextResolver() pruneContextResolver {
 	contexts := make(map[string]pruneContext)
 	contextErrors := make(map[string]error)
 	return func(wt WorktreeEntry) (pruneContext, error) {
-		repoRoot, err := vcs.FindMainRepoRootFrom(wt.Path)
+		repoRoot, err := resolvePoolRepoRoot(wt)
 		if err != nil {
-			return pruneContext{}, fmt.Errorf("resolve repository for %s: %w", wt.Path, err)
+			return pruneContext{}, err
 		}
 		if context, ok := contexts[repoRoot]; ok {
 			return context, nil

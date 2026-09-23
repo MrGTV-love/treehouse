@@ -23,6 +23,3 @@ coverage.out
 # Local agent session logs (written by Claude Code hooks)
 /logs/
 .yerel-yedek/
-
-# graft's local graph cache — regenerable, not committed (run `graft build`).
-/graft/

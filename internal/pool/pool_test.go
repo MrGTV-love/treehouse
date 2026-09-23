@@ -110,6 +110,10 @@ func TestAcquire_CloneIdentityCapacity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			readme, err := os.ReadFile(filepath.Join(path, "README.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
 			var got string
 			if leased {
 				got, err = AcquireLease(cloneB, poolDir, 1, nil, "clone-b")
@@ -124,8 +128,8 @@ func TestAcquire_CloneIdentityCapacity(t *testing.T) {
 				t.Fatalf("capacity failure changed existing state: %#v -> %#v (%v)", before, after, err)
 			}
 			assertCloneCommonDir(t, path, cloneA)
-			if content, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(content) != "hi\n" {
-				t.Fatalf("foreign slot was removed or changed: %q (%v)", content, err)
+			if content, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(content) != string(readme) {
+				t.Fatalf("foreign slot was removed or changed: %q, want %q (%v)", content, readme, err)
 			}
 			if reused, err := Acquire(cloneA, poolDir, 1, nil); err != nil || reused != path {
 				t.Fatalf("owning clone could not reuse preserved slot: %q (%v)", reused, err)
@@ -167,6 +171,55 @@ func TestAcquire_CloneIdentitySymlinkAlias(t *testing.T) {
 		if err := Release(poolDir, reused); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestAcquire_CloneIdentityCaseAlias(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased=%t", leased), func(t *testing.T) {
+			repo, poolDir := setupRepo(t)
+			alias := filepath.Join(filepath.Dir(repo), strings.ToUpper(filepath.Base(repo)))
+			repoInfo, err := os.Stat(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if aliasInfo, err := os.Stat(alias); err != nil || !os.SameFile(repoInfo, aliasInfo) {
+				t.Skipf("filesystem is case-sensitive: %s is not %s (%v)", alias, repo, err)
+			}
+			acquire := func(requester string) (string, error) {
+				if leased {
+					return AcquireLease(requester, poolDir, 1, nil, "case-test")
+				}
+				return Acquire(requester, poolDir, 1, nil)
+			}
+			path, err := acquire(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Release(poolDir, path); err != nil {
+				t.Fatal(err)
+			}
+			// Spell the slot's common dir with other letter case, as a clone
+			// reached through a differently cased path records it.
+			cmd := exec.Command("git", "rev-parse", "--absolute-git-dir")
+			cmd.Dir = path
+			gitDir, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(strings.TrimSpace(string(gitDir)), "commondir"), []byte(filepath.Join(alias, ".git")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for _, requester := range []string{repo, alias} {
+				reused, err := acquire(requester)
+				if err != nil || reused != path {
+					t.Fatalf("differently cased spelling of one clone must reuse %s: %q (%v)", path, reused, err)
+				}
+				if err := Release(poolDir, reused); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

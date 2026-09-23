@@ -109,7 +109,7 @@ func TestAcquireNonColocatedJJRefusesReuse(t *testing.T) {
 				t.Fatalf("fixture must be non-colocated, .git inspection returned %v", err)
 			}
 			if identity, err := acquisitionCommonGitDir(repo); err == nil {
-				t.Fatalf("non-colocated jj identity = %q without error; unprovable identity must not match", identity)
+				t.Fatalf("non-colocated jj identity = %v without error; unprovable identity must not match", identity)
 			}
 			slot := acquireJJCloneIdentity(t, repo, poolDir, 1, mode.leased)
 			if err := Release(poolDir, slot); err != nil {
@@ -151,13 +151,17 @@ func TestAcquireSkipsUnresolvableColocatedJJIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	readme, err := os.ReadFile(filepath.Join(slot, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	pointerPath := filepath.Join(slot, ".jj", "repo")
 	brokenPointer := filepath.Join(filepath.Dir(poolDir), "missing", ".jj", "repo")
 	if err := os.WriteFile(pointerPath, []byte(brokenPointer), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if identity, err := acquisitionCommonGitDir(slot); err == nil {
-		t.Fatalf("damaged jj workspace identity = %q without error; must not be treated as unsupported", identity)
+		t.Fatalf("damaged jj workspace identity = %v without error; must not be treated as unsupported", identity)
 	}
 	if got := acquireJJCloneIdentity(t, repo, poolDir, 2, false); got == slot {
 		t.Fatalf("acquired workspace with unresolvable identity: %s", got)
@@ -172,8 +176,8 @@ func TestAcquireSkipsUnresolvableColocatedJJIdentity(t *testing.T) {
 	if got, err := os.ReadFile(pointerPath); err != nil || string(got) != brokenPointer {
 		t.Fatalf("damaged pointer changed: got %q, %v", got, err)
 	}
-	if got, err := os.ReadFile(filepath.Join(slot, "README.md")); err != nil || string(got) != "hi\n" {
-		t.Fatalf("damaged workspace files changed: README = %q, %v", got, err)
+	if got, err := os.ReadFile(filepath.Join(slot, "README.md")); err != nil || string(got) != string(readme) {
+		t.Fatalf("damaged workspace files changed: README = %q, want %q, %v", got, readme, err)
 	}
 }
 
@@ -233,6 +237,10 @@ func TestAcquireSecondNonColocatedJJCloneRefusedForeignWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	readme, err := os.ReadFile(filepath.Join(slot, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, leased := range []bool{false, true} {
 		var got string
 		if leased {
@@ -248,8 +256,8 @@ func TestAcquireSecondNonColocatedJJCloneRefusedForeignWorkspace(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("refusal changed state: %#v -> %#v (%v)", before, after, err)
 	}
-	if got, err := os.ReadFile(filepath.Join(slot, "README.md")); err != nil || string(got) != "hi\n" {
-		t.Fatalf("first clone's workspace changed: README = %q, %v", got, err)
+	if got, err := os.ReadFile(filepath.Join(slot, "README.md")); err != nil || string(got) != string(readme) {
+		t.Fatalf("first clone's workspace changed: README = %q, want %q, %v", got, readme, err)
 	}
 	mainRoot, err := vcs.FindMainRepoRootFrom(slot)
 	if err != nil {

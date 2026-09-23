@@ -336,20 +336,6 @@ func freeTemplatedSlot(repoRoot, poolDir string, state State, poolSize int, opts
 		len(occupied), occupied[0], occupied[len(occupied)-1], repoRoot)
 }
 
-// acquisitionCommonGitDir returns a physical clone identity: the file the
-// common Git dir resolves to after symlinks, compared with os.SameFile so
-// neither a symlink alias nor letter case on a case-insensitive filesystem
-// splits one clone. A clone without one (including non-colocated jj, which
-// has no common Git dir) is an error: ownership that cannot be proven is
-// never treated as a match.
-func acquisitionCommonGitDir(dir string) (os.FileInfo, error) {
-	commonDir, err := vcs.CommonGitDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	return os.Stat(commonDir)
-}
-
 func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts acquireOptions) (LeaseInfo, error) {
 	// Before the fetch and before any slot is inspected, so a template that is
 	// wrong on its own text costs nothing. The placement rules need a slot name
@@ -378,8 +364,6 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	if err != nil {
 		return LeaseInfo{}, err
 	}
-	// An unverifiable requester identity disables reuse, not allocation.
-	commonDir, identityErr := acquisitionCommonGitDir(repoRoot)
 
 	var acquired LeaseInfo
 	var runPostCreate bool
@@ -421,8 +405,6 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		// re-acquire).
 		wantFlavor := vcs.BackendNameFor(repoRoot)
 		otherFlavor := 0
-		otherClone := 0
-		unverifiedClone := 0
 		for i, wt := range state.Worktrees {
 			if wt.Destroying || wt.Leased || ownerAlive(wt) {
 				continue
@@ -442,23 +424,6 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			}
 			if flavor != wantFlavor {
 				otherFlavor++
-				continue
-			}
-			// Pools are shared by origin URL, but a linked worktree still
-			// belongs to one physical clone. Never reset or acquire another
-			// clone's slot, even when both clones have identical refs, and
-			// never one whose owner (or our own identity) cannot be proven.
-			if identityErr != nil {
-				unverifiedClone++
-				continue
-			}
-			candidateDir, err := acquisitionCommonGitDir(wt.Path)
-			if err != nil {
-				unverifiedClone++
-				continue
-			}
-			if !os.SameFile(candidateDir, commonDir) {
-				otherClone++
 				continue
 			}
 			inUse, _ := process.IsWorktreeInUse(wt.Path)
@@ -553,13 +518,6 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		if len(state.Worktrees) >= poolSize {
 			if otherFlavor > 0 {
 				return fmt.Errorf("all %d worktrees are in use, dirty, or hold the other backend's worktrees (%d %s-flavored; the repository selects %s). Run 'treehouse status' to see details, destroy old-flavor worktrees to migrate the pool, or increase max_trees in treehouse.toml", len(state.Worktrees), otherFlavor, map[string]string{"git": "jj", "jj": "git"}[wantFlavor], wantFlavor)
-			}
-			if otherClone > 0 || unverifiedClone > 0 {
-				msg := fmt.Sprintf("all %d worktrees are in use, dirty, or not provably this clone's (%d belong to another clone; %d whose clone identity cannot be verified; max_trees = %d). A worktree is reused only by the clone it belongs to", len(state.Worktrees), otherClone, unverifiedClone, poolSize)
-				if identityErr != nil {
-					msg += fmt.Sprintf(", and this repository's clone identity cannot be verified: %v", identityErr)
-				}
-				return fmt.Errorf("%s. Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", msg)
 			}
 			return fmt.Errorf("all %d worktrees are in use or dirty (max_trees = %d). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", len(state.Worktrees), poolSize)
 		}

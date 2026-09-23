@@ -110,9 +110,8 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
       ▼
   ┌──────────────────────────────────────────────────────┐
   │  Scan pool for a safely reusable worktree            │
-  │  (this clone's, idle, unleased, clean, and HEAD      │
-  │  merged into the exact reset target; skip if safety  │
-  │  or clone ownership is unprovable)                   │
+  │  (idle, unleased, clean, and HEAD merged into the    │
+  │  exact reset target; skip if safety is unprovable)   │
   └──────────┬───────────────────────────────────────────┘
              │
         ┌────┴────┐
@@ -148,7 +147,6 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 - **Choosable base branch** — set `base_branch` in `treehouse.toml`, or pass `treehouse get --base <branch>`, to cut worktrees from a branch other than the repository default. Opt-in; unset keeps today's inference. Worktrees stay in detached HEAD — this selects the commit they start at, it does not create or check out a branch.
 - **Unique worktree directory names** — pass `treehouse get --unique-leaf` (or set `unique_leaf` in `treehouse.toml`) to name new slots `<repo>-<slot>` instead of `<repo>`, so tooling that derives per-checkout identity from the directory name tells the slots apart. Opt-in; off keeps today's layout, and existing worktrees are never moved.
 - **Choosable worktree path** — set `worktree_path` in `treehouse.toml`, or pass `treehouse get --worktree-path '<template>'`, to place new worktrees somewhere a tool requires instead of `{pool}/{slot}/{repo}`. Opt-in, and creation-only: worktrees already in the pool keep their recorded paths. See [Worktree path](#worktree-path).
-- **Clone-correct reuse** — two local clones of the same remote share one pool, but a worktree is only ever reused by the clone it belongs to, judged by its physical Git common directory (symlinked or, on a case-insensitive filesystem, differently cased paths to one clone count as that clone). Another clone's idle worktree is skipped and left intact; if nothing reusable is left, `get` creates a new worktree up to `max_trees` and otherwise fails with a message counting the foreign and unverifiable worktrees. A worktree whose owning clone cannot be proven is never reused, and neither is any worktree when the requesting clone's own identity cannot be proven. Non-colocated jj repositories have no Git common directory, so their worktrees are never reused; `get` creates a new one each time until `max_trees` is reached.
 - **No daemon** - all operations are inline CLI commands.
   Pool state is a small on-disk file, written under a lock by each command.
 - **Interactive shell setup** — when opening a subshell on macOS or Linux, `treehouse`, `treehouse get`, and `treehouse enter` start `$SHELL` as an interactive login shell when it resolves to `bash`, `fish`, or `zsh`. Other shells, fallback shells, and Windows use their default invocation. A regular executable that is merely named like a supported shell but does not accept `-i -l` (for example a wrapper script at `/opt/tools/bash`) is an accepted limitation: the resolved basename is the contract, and PATH-identity probing would reject genuine second installs of the same shell.

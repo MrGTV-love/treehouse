@@ -336,19 +336,18 @@ func freeTemplatedSlot(repoRoot, poolDir string, state State, poolSize int, opts
 		len(occupied), occupied[0], occupied[len(occupied)-1], repoRoot)
 }
 
-// acquisitionCommonGitDir returns a physical clone identity. A clone without
-// one (including non-colocated jj, which has no common Git dir) is an error:
-// ownership that cannot be proven is never treated as a match.
-func acquisitionCommonGitDir(dir string) (string, error) {
+// acquisitionCommonGitDir returns a physical clone identity: the file the
+// common Git dir resolves to after symlinks, compared with os.SameFile so
+// neither a symlink alias nor letter case on a case-insensitive filesystem
+// splits one clone. A clone without one (including non-colocated jj, which
+// has no common Git dir) is an error: ownership that cannot be proven is
+// never treated as a match.
+func acquisitionCommonGitDir(dir string) (os.FileInfo, error) {
 	commonDir, err := vcs.CommonGitDir(dir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	commonDir, err = filepath.Abs(commonDir)
-	if err != nil {
-		return "", err
-	}
-	return filepath.EvalSymlinks(commonDir)
+	return os.Stat(commonDir)
 }
 
 func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts acquireOptions) (LeaseInfo, error) {
@@ -458,7 +457,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 				unverifiedClone++
 				continue
 			}
-			if candidateDir != commonDir {
+			if !os.SameFile(candidateDir, commonDir) {
 				otherClone++
 				continue
 			}

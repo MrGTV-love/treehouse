@@ -213,7 +213,7 @@ func planAndDestroy(poolDir string, targets []WorktreeEntry, allowLeased bool, o
 	for _, wt := range targets {
 		// A resolution failure leaves the default ref empty, which
 		// classifyForDestroy reports as unverified rather than disposable.
-		context, _ := resolveContext(wt)
+		context := resolveDestroyContext(resolveContext, wt)
 		target := classifyForDestroy(wt, context.RepoRoot, context.DefaultRef)
 		measureDestroySize(poolDir, &target)
 		ok, skip := opts.allows(target, allowLeased)
@@ -244,6 +244,17 @@ func planAndDestroy(poolDir string, targets []WorktreeEntry, allowLeased bool, o
 	}
 	result.Skipped = append(result.Skipped, execSkips...)
 	return result, nil
+}
+
+// resolveDestroyContext keeps markerless slots out of the configured-backend
+// fallback, which could otherwise resolve and fetch a repository enclosing the
+// pool. An empty context keeps the damaged slot unverified.
+func resolveDestroyContext(resolveContext pruneContextResolver, wt WorktreeEntry) pruneContext {
+	if vcs.WorktreeBackendName(wt.Path) == "" {
+		return pruneContext{}
+	}
+	context, _ := resolveContext(wt)
+	return context
 }
 
 // allows reports whether opts authorize removing target, returning a populated
@@ -409,7 +420,7 @@ func executeDestroy(poolDir string, removable []DestroyTarget, resolveContext pr
 			if _, ok := plannedByPath[state.Worktrees[i].Path]; !ok {
 				continue
 			}
-			context, _ := resolveContext(state.Worktrees[i])
+			context := resolveDestroyContext(resolveContext, state.Worktrees[i])
 			current := classifyForDestroy(state.Worktrees[i], context.RepoRoot, context.DefaultRef)
 			if planned, ok := plannedByPath[current.Path]; ok && current.Bytes == 0 {
 				current.Bytes = planned.Bytes
@@ -470,7 +481,7 @@ func executeDestroy(poolDir string, removable []DestroyTarget, resolveContext pr
 			path := state.Worktrees[idx].Path
 			currentEntry := state.Worktrees[idx]
 			restoreOriginalOwnerReservation(&currentEntry, reservation)
-			context, _ := resolveContext(currentEntry)
+			context := resolveDestroyContext(resolveContext, currentEntry)
 			current := classifyForDestroy(currentEntry, context.RepoRoot, context.DefaultRef)
 			measureDestroySize(poolDir, &current)
 			if planned, ok := plannedByPath[path]; ok && current.Bytes == 0 {

@@ -2227,13 +2227,7 @@ func TestExecuteDestroy_RemovalFailureRestoresOriginalOwnerReservation(t *testin
 	planned := classifyForDestroy(original, repoDir, defaultRef)
 	measureDestroySize(poolDir, &planned)
 
-	bogusGitDir := filepath.Join(t.TempDir(), "not-git-metadata")
-	if err := os.MkdirAll(bogusGitDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(wtPath, ".git"), []byte("gitdir: "+bogusGitDir+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	runGit(t, repoDir, "worktree", "lock", "--reason", "test removal refusal", wtPath)
 	resolveContext := fixedPruneContextResolver(pruneContext{RepoRoot: repoDir, DefaultRef: defaultRef})
 	destroyed, skipped, err := executeDestroy(poolDir, []DestroyTarget{planned}, resolveContext, true, DestroyOptions{IncludeInUse: true, IncludeUnlanded: true})
 	if err != nil {
@@ -2244,6 +2238,9 @@ func TestExecuteDestroy_RemovalFailureRestoresOriginalOwnerReservation(t *testin
 	}
 	if !hasDestroySkipFlags(skipped, wtPath, DestroyInUse) {
 		t.Fatalf("expected failed removal skip without include flags, got %#v", skipped)
+	}
+	if !strings.Contains(skipped[0].Target.Detail, "VCS refused to remove worktree") {
+		t.Fatalf("expected VCS removal refusal detail, got %#v", skipped)
 	}
 
 	state, err = ReadState(poolDir)
@@ -3997,6 +3994,47 @@ func TestDestroyWorktree_MarkerlessSlot(t *testing.T) {
 	// at the next add.
 	if _, err := Acquire(repoDir, poolDir, 1, nil); err != nil {
 		t.Fatalf("Acquire after destroying the markerless slot failed: %v", err)
+	}
+}
+
+func TestDestroyWorktree_MarkerlessSlotDoesNotFetchEnclosingRepo(t *testing.T) {
+	repoDir, _ := setupRepo(t)
+	poolDir := filepath.Join(repoDir, "pool") // in-project pool root
+
+	wtPath, err := Acquire(repoDir, poolDir, 1, nil)
+	if err != nil {
+		t.Fatalf("Acquire failed: %v", err)
+	}
+	clearOwnerReservation(t, poolDir, wtPath)
+	if err := os.Remove(filepath.Join(wtPath, ".git")); err != nil {
+		t.Fatalf("removing the slot marker: %v", err)
+	}
+
+	localOriginHead := gitOut(t, repoDir, "rev-parse", "refs/remotes/origin/main")
+	updater := filepath.Join(filepath.Dir(repoDir), "updater")
+	runGit(t, "", "clone", filepath.Join(filepath.Dir(repoDir), "remote.git"), updater)
+	runGit(t, updater, "config", "user.email", "test@test.com")
+	runGit(t, updater, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(updater, "remote.txt"), []byte("new remote commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, updater, "add", "remote.txt")
+	runGit(t, updater, "commit", "-m", "advance remote")
+	runGit(t, updater, "push", "origin", "main")
+	remoteHead := gitOut(t, updater, "rev-parse", "HEAD")
+	if remoteHead == localOriginHead {
+		t.Fatal("test setup did not advance the remote")
+	}
+
+	result, err := DestroyWorktree(poolDir, wtPath, DestroyOptions{IncludeUnlanded: true})
+	if err != nil {
+		t.Fatalf("DestroyWorktree failed: %v", err)
+	}
+	if len(result.Destroyed) != 1 || len(result.Skipped) != 0 {
+		t.Fatalf("expected markerless slot to be destroyed, got %+v", result)
+	}
+	if got := gitOut(t, repoDir, "rev-parse", "refs/remotes/origin/main"); got != localOriginHead {
+		t.Fatalf("markerless destroy fetched the enclosing repository: origin/main moved %s -> %s", localOriginHead, got)
 	}
 }
 

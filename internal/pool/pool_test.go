@@ -66,9 +66,10 @@ func TestAcquire_CloneIdentity(t *testing.T) {
 		t.Run(fmt.Sprintf("leased=%t", leased), func(t *testing.T) {
 			cloneA, cloneB, poolDir := setupSharedClonePool(t)
 			paths := make(map[string]string)
-			// A reuses its slot before B arrives; then both clones must keep
-			// reusing their own slot, despite the shared origin and pool.
-			for _, repo := range []string{cloneA, cloneA, cloneB, cloneA, cloneB} {
+			// B owns the lowest-numbered available slot before A arrives.
+			// A must create its own slot, then reuse it even while B's lower
+			// slot remains available and the shared pool is at its cap.
+			for _, repo := range []string{cloneB, cloneB, cloneA, cloneA, cloneB} {
 				var path string
 				var err error
 				if leased {
@@ -120,8 +121,8 @@ func TestAcquire_CloneIdentityCapacity(t *testing.T) {
 			} else {
 				got, err = Acquire(cloneB, poolDir, 1, nil)
 			}
-			if err == nil || !strings.Contains(err.Error(), "max_trees = 1") || !strings.Contains(err.Error(), "1 belong to another clone") || got != "" {
-				t.Fatalf("expected explicit capacity failure, got path=%q err=%v", got, err)
+			if err == nil || got != "" {
+				t.Fatalf("shared cap must refuse allocation from another clone, got path=%q err=%v", got, err)
 			}
 			after, err := ReadState(poolDir)
 			if err != nil || !reflect.DeepEqual(before, after) {

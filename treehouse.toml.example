@@ -2,7 +2,8 @@
 # Place repo-safe settings at <repo_root>/treehouse.toml.
 # Place executable hooks only in ~/.config/treehouse/config.toml.
 
-# Maximum number of worktrees in the pool
+# Maximum total number of worktrees in the shared pool, not per clone.
+# Other clones' slots count too; get only reuses this clone's slots.
 max_trees = 16
 
 # Optional worktree root directory.

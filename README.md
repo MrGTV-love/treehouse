@@ -488,7 +488,7 @@ Create a repo config file with `treehouse init`, or add one manually:
 **User-level:** `~/.config/treehouse/config.toml`
 
 ```toml
-# Maximum number of worktrees in the pool
+# Maximum total number of worktrees in the shared pool (not per clone)
 max_trees = 16
 
 # Optional worktree root directory.
@@ -522,6 +522,18 @@ max_trees = 16
 The repo-level config takes precedence for repo-safe settings.
 `treehouse prune --all` can run without a repository, so it uses only the user-level config and does not read per-repo `treehouse.toml` files while sweeping.
 If no config is found, the default pool size is 16.
+
+`max_trees` remains a **shared-pool cap**, not a per-clone allowance. Same-named
+clones with the same origin URL and pool root share that budget; all registered
+slots count, including another clone's idle slots. Acquisition only reuses the
+requesting clone's slots. If none is safe to reuse, it creates one only when the
+pool's total is below the calling clone's effective `max_trees`; otherwise it
+fails without handing out a foreign slot. Reuse of a safe own-clone slot still
+works at the cap.
+
+Keeping the existing shared cap avoids silently multiplying disk usage by the
+number of clones. Clones sharing a pool should configure the same `max_trees`;
+the limit is read from each invocation's config, not stored in pool state.
 
 ### Base branch
 

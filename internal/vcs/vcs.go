@@ -436,6 +436,19 @@ func RemoveCleanWorktree(repoRoot, path string) error {
 	return backendForRemoval(repoRoot, path).RemoveCleanWorktree(repoRoot, path)
 }
 
+// ErrWorktreeNotDisposable is a safety refusal before automatic removal starts.
+var ErrWorktreeNotDisposable = gitvcs.ErrWorktreeNotDisposable
+
+// RemoveLandedWorktree removes only a clean linked Git worktree whose commits
+// are still reachable on a remote. beforeRemove runs with HEAD locked so the
+// pool can make its final process and ownership checks before deletion.
+func RemoveLandedWorktree(repoRoot, path string, beforeRemove func() error) error {
+	if WorktreeBackendName(path) != "git" {
+		return fmt.Errorf("%w: automatic reclamation requires a Git worktree", ErrWorktreeNotDisposable)
+	}
+	return gitvcs.RemoveLandedWorktree(repoRoot, path, beforeRemove)
+}
+
 // slotMarkerBackend reports the backend a worktree's own marker names: a
 // .git entry means a git worktree, a .jj directory means a jj workspace.
 // Pool slots hold exactly one of the two (jj workspaces are never

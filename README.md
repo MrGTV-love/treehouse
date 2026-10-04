@@ -148,7 +148,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 - **Choosable base branch** — set `base_branch` in `treehouse.toml`, or pass `treehouse get --base <branch>`, to cut worktrees from a branch other than the repository default. Opt-in; unset keeps today's inference. This composes with `--branch`: the new branch starts at the selected base.
 - **Unique worktree directory names** — pass `treehouse get --unique-leaf` (or set `unique_leaf` in `treehouse.toml`) to name new slots `<repo>-<slot>` instead of `<repo>`, so tooling that derives per-checkout identity from the directory name tells the slots apart. Opt-in; off keeps today's layout, and existing worktrees are never moved.
 - **Choosable worktree path** — set `worktree_path` in `treehouse.toml`, or pass `treehouse get --worktree-path '<template>'`, to place new worktrees somewhere a tool requires instead of `{pool}/{slot}/{repo}`. Opt-in, and creation-only: worktrees already in the pool keep their recorded paths. See [Worktree path](#worktree-path).
-- **Clone-correct reuse** — two local clones of the same remote share one pool, but a worktree is only ever reused by the clone it belongs to, judged by its physical Git common directory (symlinked or, on a case-insensitive filesystem, differently cased paths to one clone count as that clone). Another clone's idle worktree is skipped and left intact; if nothing reusable is left, `get` creates a new worktree up to `max_trees` and otherwise fails with a message counting the foreign and unverifiable worktrees. A worktree whose owning clone cannot be proven is never reused, and neither is any worktree when the requesting clone's own identity cannot be proven. Non-colocated jj repositories have no Git common directory, so their worktrees are never reused; `get` creates a new one each time until `max_trees` is reached.
+- **Clone-correct reuse** — two local clones of the same remote share one pool, but a worktree is only ever reused by the clone it belongs to, judged by its physical Git common directory (symlinked or, on a case-insensitive filesystem, differently cased paths to one clone count as that clone). If nothing reusable is left, `get` creates a new worktree up to `max_trees`. At the cap, it can safely remove one idle, unleased, clean foreign Git worktree whose commits are backed by live remote refs, then create a fresh worktree for the calling clone. Otherwise acquisition fails without handing out another clone's tree. Unverifiable clone identities are never reused or automatically reclaimed. Non-colocated jj repositories have no Git common directory, so their worktrees are never reused; `get` creates a new one each time until `max_trees` is reached. Automatic foreign-slot reclamation is Git-only.
 - **Opt-in APFS sharing** - share identical large tracked files with the main checkout using independent copy-on-write clones. Default off, macOS/APFS and fresh Git slots only; existing slots and ignored output are never swept. See [APFS copy-on-write sharing](#apfs-copy-on-write-sharing).
 - **No daemon** - all operations are inline CLI commands.
   Pool state is a small on-disk file, written under a lock by each command.
@@ -319,7 +319,7 @@ git fetch origin main refs/pull/123/head
 treehouse get --lease --no-fetch --json
 ```
 
-With `--no-fetch`, Treehouse resets or creates the worktree from existing local refs and never contacts `origin`. The caller is responsible for ensuring those refs and objects are current.
+With `--no-fetch`, Treehouse resets or creates the worktree from existing local refs and skips fetches. The caller is responsible for ensuring those refs and objects are current. Ordinary reuse and allocation below the cap remain network-free. If acquisition needs to reclaim a foreign slot at the cap, it still queries live remote refs before deleting that checkout; stale local tracking refs cannot authorize deletion, and an unreachable remote cannot supply the required proof.
 
 `treehouse status --json` returns an array with `name`, `path`, `status`, `branch`, `detached`, `branch_error`, `recovery_reason`, `recovery_backup`, `flavor`, `lease_id`, `lease_holder`, `leased_at`, and `processes`. `recovery_reason` is set when an unsafe recovered lease remains quarantined. `recovery_backup` is the slot's recovery backup folder, set while that folder holds anything. `branch` names the checked-out branch of a git slot on a branch; it is empty for a detached HEAD, a jj slot, and a markerless (damaged) slot. `detached` is `true` only for a git slot on a detached HEAD (the state `treehouse get` leaves by default) and is omitted when false; `branch_error` is set when a slot's branch could not be read, so a read failure is never mistaken for a detached HEAD or an empty branch. `processes` is what `treehouse return` would terminate in that worktree, not every process whose working directory is inside it: the calling process and its ancestors are excluded, so running `status` from inside a pooled worktree reports what is resident in the slot instead of the shell you typed the command into. When the process table itself cannot be read, `status` is `unverified` and `processes` is empty: whether anything is running there is unknown, so the slot is not reported `available`, `dirty`, or `in-use`, and the error is printed as a warning on stderr. A lease, an owner reservation, or the slot you are standing in is still reported as such, because those facts do not depend on the scan. `flavor` is the backend the worktree's own marker identifies (`"git"` or `"jj"`) and is omitted when no marker is found. Non-leased entries use empty lease strings and a `null` timestamp. State files written before lease identities remain readable; their existing leases have an empty `lease_id` until released and acquired again.
 
@@ -526,10 +526,21 @@ If no config is found, the default pool size is 16.
 `max_trees` remains a **shared-pool cap**, not a per-clone allowance. Same-named
 clones with the same origin URL and pool root share that budget; all registered
 slots count, including another clone's idle slots. Acquisition only reuses the
-requesting clone's slots. If none is safe to reuse, it creates one only when the
-pool's total is below the calling clone's effective `max_trees`; otherwise it
-fails without handing out a foreign slot. Reuse of a safe own-clone slot still
-works at the cap.
+requesting clone's slots. If none is safe to reuse, it creates one when the
+pool's total is below the calling clone's effective `max_trees`. At exactly the
+cap, it first attempts to remove one provably disposable foreign Git slot and
+then creates a fresh caller-owned slot, keeping the total unchanged. In-use,
+leased, dirty, damaged and unlanded slots are never candidates; a failed
+process, ownership or remote-landing check means leave the slot alone. A local
+base branch or stale remote-tracking ref is not sufficient deletion evidence.
+If no foreign slot qualifies, or the pool is already above the effective cap,
+acquisition fails. Reuse of a safe own-clone slot still works at the cap.
+
+Automatic reclamation removes the old checkout and its ignored build/cache
+files using Git's non-forced clean-worktree removal; it never migrates a
+worktree between clones. Files beside the old checkout are left alone. The
+deletion is recorded before creating the replacement, so a later creation
+failure leaves a freed slot rather than a foreign slot consuming the budget.
 
 Keeping the existing shared cap avoids silently multiplying disk usage by the
 number of clones. Clones sharing a pool should configure the same `max_trees`;

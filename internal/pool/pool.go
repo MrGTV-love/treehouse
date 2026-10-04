@@ -625,6 +625,11 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		}
 
 		// No available worktree — create new if pool allows
+		if len(state.Worktrees) == poolSize && identityErr == nil && wantFlavor == "git" {
+			if err := reclaimForeignWorktree(poolDir, &state, commonDir, opts.skipFetch); err != nil {
+				return err
+			}
+		}
 		if len(state.Worktrees) >= poolSize {
 			if otherFlavor > 0 {
 				return fmt.Errorf("all %d worktrees are in use, dirty, or hold the other backend's worktrees (%d %s-flavored; the repository selects %s). Run 'treehouse status' to see details, destroy old-flavor worktrees to migrate the pool, or increase max_trees in treehouse.toml", len(state.Worktrees), otherFlavor, map[string]string{"git": "jj", "jj": "git"}[wantFlavor], wantFlavor)

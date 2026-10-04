@@ -696,6 +696,86 @@ func RemoveCleanWorktree(repoRoot, path string) error {
 	return err
 }
 
+// ErrWorktreeNotDisposable identifies a refusal before any deletion is attempted.
+var ErrWorktreeNotDisposable = errors.New("worktree is not provably disposable")
+
+// RemoveLandedWorktree holds Git's HEAD lock through verification and clean
+// removal. Unlike prune's base-branch check, only live remote refs may protect
+// these commits: a branch in the clone being reclaimed is not a remote backup.
+func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() error) (err error) {
+	removing := false
+	defer func() {
+		if err != nil && !removing {
+			err = fmt.Errorf("%w: %v", ErrWorktreeNotDisposable, err)
+		}
+	}()
+	root, err := os.OpenRoot(worktreePath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	identity, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	if err := authenticateLinkedWorktree(root, worktreePath); err != nil {
+		return err
+	}
+	headPath, err := gitPath(worktreePath, "HEAD")
+	if err != nil {
+		return err
+	}
+	lockPath := headPath + ".lock"
+	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+	if err != nil {
+		return fmt.Errorf("cannot lock worktree HEAD: %w", err)
+	}
+	// Close before removal: Windows cannot remove an open lock file.
+	if err := lock.Close(); err != nil {
+		_ = os.Remove(lockPath)
+		return err
+	}
+	defer os.Remove(lockPath)
+	head, err := worktreeHead(worktreePath)
+	if err != nil {
+		return err
+	}
+
+	untracked, reason := RecoveryWorktree(worktreePath)
+	if reason != "" || len(untracked) != 0 {
+		return fmt.Errorf("worktree is not provably clean: %s (%d untracked paths)", reason, len(untracked))
+	}
+	if !headContainedOnRemote(worktreePath) {
+		return fmt.Errorf("worktree HEAD is not provably backed by a live remote")
+	}
+	if beforeRemove != nil {
+		if err := beforeRemove(); err != nil {
+			return err
+		}
+	}
+	currentHead, err := worktreeHead(worktreePath)
+	if err != nil || currentHead != head {
+		return fmt.Errorf("worktree HEAD changed during removal verification")
+	}
+	untracked, reason = RecoveryWorktree(worktreePath)
+	if reason != "" || len(untracked) != 0 {
+		return fmt.Errorf("worktree became dirty during removal verification: %s", reason)
+	}
+	current, err := openRootUnchanged(worktreePath, identity)
+	if err != nil {
+		return err
+	}
+	if err := authenticateLinkedWorktree(current, worktreePath); err != nil {
+		current.Close()
+		return err
+	}
+	current.Close()
+	// Release directory handles before Git removes the tree on Windows.
+	root.Close()
+	removing = true
+	return RemoveCleanWorktree(repoRoot, worktreePath)
+}
+
 // HasUnseededBranchCreationOutput ignores checkout-hook uncertainty when no
 // checkout ran, but inspects reference-transaction hooks and worktree output.
 func HasUnseededBranchCreationOutput(worktreePath string, seededPaths []string) (bool, error) {

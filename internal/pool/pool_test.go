@@ -107,33 +107,28 @@ func TestAcquire_CloneIdentityCapacity(t *testing.T) {
 			if err := Release(poolDir, path); err != nil {
 				t.Fatal(err)
 			}
-			before, err := ReadState(poolDir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			readme, err := os.ReadFile(filepath.Join(path, "README.md"))
-			if err != nil {
-				t.Fatal(err)
-			}
 			var got string
 			if leased {
 				got, err = AcquireLease(cloneB, poolDir, 1, nil, "clone-b")
 			} else {
 				got, err = Acquire(cloneB, poolDir, 1, nil)
 			}
-			if err == nil || got != "" {
-				t.Fatalf("shared cap must refuse allocation from another clone, got path=%q err=%v", got, err)
+			if err != nil {
+				t.Fatalf("idle landed foreign slot must not block acquisition at the shared cap: %v", err)
+			}
+			assertCloneCommonDir(t, got, cloneB)
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("foreign worktree was not removed: %v", err)
 			}
 			after, err := ReadState(poolDir)
-			if err != nil || !reflect.DeepEqual(before, after) {
-				t.Fatalf("capacity failure changed existing state: %#v -> %#v (%v)", before, after, err)
+			if err != nil || len(after.Worktrees) != 1 || after.Worktrees[0].Path != got {
+				t.Fatalf("replacement must keep the shared cap: %#v (%v)", after, err)
 			}
-			assertCloneCommonDir(t, path, cloneA)
-			if content, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(content) != string(readme) {
-				t.Fatalf("foreign slot was removed or changed: %q, want %q (%v)", content, readme, err)
+			if err := Release(poolDir, got); err != nil {
+				t.Fatal(err)
 			}
-			if reused, err := Acquire(cloneA, poolDir, 1, nil); err != nil || reused != path {
-				t.Fatalf("owning clone could not reuse preserved slot: %q (%v)", reused, err)
+			if reused, err := Acquire(cloneB, poolDir, 1, nil); err != nil || reused != got {
+				t.Fatalf("replacement could not be reused by its owning clone: %q (%v)", reused, err)
 			}
 		})
 	}

@@ -4,6 +4,7 @@
 
 # Maximum total number of worktrees in the shared pool, not per clone.
 # Other clones' slots count too; get only reuses this clone's slots.
+# At the cap, get can replace an idle, clean, remotely backed foreign Git slot.
 max_trees = 16
 
 # Optional worktree root directory.

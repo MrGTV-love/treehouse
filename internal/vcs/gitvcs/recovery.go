@@ -89,3 +89,54 @@ func RecoveryHeadContained(dir, base string) bool {
 	out, err := runGitRaw(dir, append(args, "--")...)
 	return err == nil && len(bytes.TrimSpace(out)) == 0
 }
+
+// headContainedOnRemote intersects locally readable tips with live advertised
+// remote refs, then checks all HEAD ancestry in one walk. Stale tracking refs,
+// local branches and unreachable remotes are never deletion evidence.
+func headContainedOnRemote(dir string) bool {
+	head, err := worktreeHead(dir)
+	if err != nil {
+		return false
+	}
+	local, err := runGitRaw(dir, "for-each-ref", "--format=%(objectname)", "refs/remotes", "refs/tags")
+	if err != nil {
+		return false
+	}
+	known := make(map[string]bool)
+	known[head] = true
+	for _, tip := range strings.Fields(string(local)) {
+		known[tip] = true
+	}
+	remotes, err := runGitRaw(dir, "remote")
+	if err != nil {
+		return false
+	}
+	var revisions bytes.Buffer
+	revisions.WriteString(head)
+	revisions.WriteByte('\n')
+	backed := false
+	for _, remote := range strings.Split(strings.TrimSpace(string(remotes)), "\n") {
+		if remote == "" {
+			continue
+		}
+		refs, err := runGitRaw(dir, "ls-remote", "--refs", remote)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(refs), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) != 2 || !isCommitID(fields[0]) || !known[fields[0]] {
+				continue
+			}
+			revisions.WriteByte('^')
+			revisions.WriteString(fields[0])
+			revisions.WriteByte('\n')
+			backed = true
+		}
+	}
+	if !backed {
+		return false
+	}
+	out, err := gitOutputEnv(dir, nil, revisions.Bytes(), "rev-list", "-n", "1", "--stdin", "--")
+	return err == nil && len(bytes.TrimSpace(out)) == 0
+}

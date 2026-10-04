@@ -95,7 +95,7 @@ func init() {
 	getCmd.Flags().BoolVar(&getLease, "lease", false, "Durably lease a worktree without opening a subshell; print only its path to stdout")
 	getCmd.Flags().StringVar(&getLeaseHolder, "lease-holder", "", "Optional label recorded as the lease holder (defaults to $TREEHOUSE_LEASE_HOLDER)")
 	getCmd.Flags().BoolVar(&getJSON, "json", false, "Print lease allocation as JSON (requires --lease)")
-	getCmd.Flags().BoolVar(&getNoFetch, "no-fetch", false, "Skip fetching origin before acquiring; use existing local refs")
+	getCmd.Flags().BoolVar(&getNoFetch, "no-fetch", false, "Skip fetches and use existing local refs; foreign-slot reclamation at the cap still verifies live remotes")
 	getCmd.Flags().StringVarP(&getBranch, "branch", "b", "", "Create and check out a new Git branch at the acquired commit (fails if it already exists)")
 	getCmd.Flags().StringVar(&getBase, "base", "", "Branch to cut this worktree from, overriding base_branch in config (default: inferred from the repository)")
 	getCmd.Flags().StringVar(&getIncludeFile, "include-file", "", "Replace committed .worktreeinclude with this file (relative to the current directory)")

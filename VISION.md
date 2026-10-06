@@ -17,7 +17,7 @@ Treehouse isolates working directories and lifecycle ownership; it is not a secu
 Treehouse should delete or reset user work only when the scope is clear and the required facts can be verified against current Git, process, and lifecycle state.
 Under uncertainty, leave the worktree in place with an actionable explanation, and verify the safety facts again at deletion time.
 
-Destructive commands should preview their effect by default, require explicit intent to act, and gate independent risks separately.
+Explicit cleanup commands (`prune` and `destroy`) should preview their effect by default, require explicit intent to act, and gate independent risks separately. Acquisition's automatic reclamation policy is described in [README: Configuration](README.md#configuration).
 Blanket force options, ambiguous targets, and global delete-everything paths should be resisted.
 Safe broad cleanup may inspect many pools, but leases and unverified work must remain protected.
 

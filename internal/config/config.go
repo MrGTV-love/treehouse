@@ -235,7 +235,7 @@ func ResolvePoolDir(repoRoot string, root string) (string, error) {
 		return "", err
 	}
 	// Use remote URL for the hash when available; fall back to the
-	// absolute repo path for purely-local repositories.
+	// filesystem-resolved repo path for purely-local repositories.
 	hashInput, err := vcs.GetRemoteURL(repoRoot)
 	if err != nil {
 		hashInput = repoRoot

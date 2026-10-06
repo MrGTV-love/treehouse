@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
+	"github.com/kunchenguid/treehouse/v3/internal/vcs"
 )
 
 type statePathIndex struct {
@@ -53,7 +54,7 @@ func normalizeStatePaths(s State) (State, statePathIndex, error) {
 			}
 		}
 		if i, ok := index.find(identity, info); ok {
-			merged, ok := mergeAliasEntries(entries[i], wt, identity)
+			merged, ok := mergeAliasEntries(entries[i], wt)
 			if !ok {
 				// Do not choose a winner when two records carry incompatible
 				// ownership or trusted state. Returning an error leaves the
@@ -72,35 +73,49 @@ func normalizeStatePaths(s State) (State, statePathIndex, error) {
 	return s, index, nil
 }
 
-func mergeAliasEntries(a, b WorktreeEntry, identity string) (WorktreeEntry, bool) {
+func mergeAliasEntries(a, b WorktreeEntry) (WorktreeEntry, bool) {
 	if a.Name != b.Name {
 		return WorktreeEntry{}, false
+	}
+	if a.Path == b.Path && a.CreatedAt == b.CreatedAt && a.Destroying == b.Destroying &&
+		a.OwnerPID == b.OwnerPID && a.OwnerStartedAt == b.OwnerStartedAt &&
+		a.Leased == b.Leased && a.LeaseID == b.LeaseID && a.LeaseHolder == b.LeaseHolder && a.LeasedAt == b.LeasedAt &&
+		a.BaseBranch == b.BaseBranch && a.SeedInventoryKnown == b.SeedInventoryKnown &&
+		a.SeedInventoryDigest == b.SeedInventoryDigest && (a.SeededPaths == nil) == (b.SeededPaths == nil) &&
+		slices.Equal(a.SeededPaths, b.SeededPaths) && a.SeedBackend == b.SeedBackend && a.SeedAuthIdentity == b.SeedAuthIdentity &&
+		a.RecoveryError == b.RecoveryError && a.RecoveryReason == b.RecoveryReason {
+		return a, true
 	}
 	// A reconstructed alias (including one an older binary auto-freed) has
 	// no ownership, requested base or seeded files to contribute. It must not
 	// overwrite the authoritative record's lease, owner or trusted inventory.
-	if emptyAliasRecord(a) && emptyAliasRecord(b) {
-		if (!a.SeedInventoryKnown && b.SeedInventoryKnown) ||
-			(a.SeedInventoryKnown == b.SeedInventoryKnown && a.LeaseHolder == RecoveredLeaseHolder && b.LeaseHolder != RecoveredLeaseHolder) {
-			return b, true
+	aEmpty, bEmpty := emptyAliasRecord(a), emptyAliasRecord(b)
+	if aEmpty && bEmpty {
+		if a.Path != b.Path {
+			registered, err := vcs.RegisteredWorktreePath(a.Path)
+			if err == nil {
+				if a.SeedInventoryKnown && registered == a.Path && registered != b.Path {
+					return a, true
+				}
+				if b.SeedInventoryKnown && registered == b.Path && registered != a.Path {
+					return b, true
+				}
+			}
 		}
-		return a, true
+		return WorktreeEntry{}, false
 	}
-	if emptyAliasRecord(b) {
-		return a, true
-	}
-	if emptyAliasRecord(a) {
-		return b, true
-	}
-	if a.Destroying == b.Destroying && a.OwnerPID == b.OwnerPID && a.OwnerStartedAt == b.OwnerStartedAt &&
-		a.Leased == b.Leased && a.LeaseID == b.LeaseID && a.LeaseHolder == b.LeaseHolder && a.LeasedAt.Equal(b.LeasedAt) &&
-		a.BaseBranch == b.BaseBranch && a.SeedInventoryKnown == b.SeedInventoryKnown &&
-		slices.Equal(a.SeededPaths, b.SeededPaths) && a.SeedBackend == b.SeedBackend && a.SeedAuthIdentity == b.SeedAuthIdentity &&
-		a.RecoveryError == b.RecoveryError && a.RecoveryReason == b.RecoveryReason {
-		if b.Path == identity && a.Path != identity {
-			return b, true
+	if aEmpty != bEmpty {
+		authoritative, alias := a, b
+		if aEmpty {
+			authoritative, alias = b, a
 		}
-		return a, true
+		if authoritative.Path != alias.Path {
+			registered, err := vcs.RegisteredWorktreePath(authoritative.Path)
+			if err == nil && registered == alias.Path {
+				return WorktreeEntry{}, false
+			}
+		}
+		return authoritative, true
 	}
 	return WorktreeEntry{}, false
 }

@@ -479,6 +479,14 @@ func WorktreeBackendNameChecked(path string) (string, error) {
 	return "", nil
 }
 
+func RegisteredWorktreePath(worktreePath string) (string, error) {
+	name, err := WorktreeBackendNameChecked(worktreePath)
+	if err != nil || name != "git" {
+		return "", err
+	}
+	return gitvcs.RegisteredWorktreePath(worktreePath)
+}
+
 // markerPresent reports whether path itself exists, without following
 // symlinks. A dangling symlink is present: the entry is on disk and its
 // unresolvable target is a read failure for the caller to surface, not a

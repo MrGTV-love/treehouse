@@ -715,6 +715,39 @@ func requireNoWorktreeOperation(gitDir string) error {
 	return nil
 }
 
+func requireCleanRemovalAllowed(worktreePath, gitDir string) error {
+	for _, marker := range []string{"locked", "modules"} {
+		_, err := os.Lstat(filepath.Join(gitDir, marker))
+		if err == nil {
+			return fmt.Errorf("worktree has removal-protected metadata (%s)", marker)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot verify worktree removal metadata (%s): %w", marker, err)
+		}
+	}
+	stages, err := runGitRaw(worktreePath, "ls-files", "--stage", "-z")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree submodules: %w", err)
+	}
+	for _, entry := range recoveryNUL(stages) {
+		if !strings.HasPrefix(entry, "160000 ") {
+			continue
+		}
+		_, name, ok := strings.Cut(entry, "\t")
+		if !ok {
+			return fmt.Errorf("cannot verify worktree submodule entry")
+		}
+		_, err := os.Lstat(filepath.Join(worktreePath, filepath.FromSlash(name), ".git"))
+		if err == nil {
+			return fmt.Errorf("worktree has an initialized submodule (%s)", name)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot verify worktree submodule (%s): %w", name, err)
+		}
+	}
+	return nil
+}
+
 // RemoveLandedWorktree holds Git's HEAD lock through verification and clean
 // removal. Unlike prune's base-branch check, only live remote refs may protect
 // these commits: a branch in the clone being reclaimed is not a remote backup.
@@ -756,6 +789,9 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() err
 	if err := requireNoWorktreeOperation(gitDir); err != nil {
 		return err
 	}
+	if err := requireCleanRemovalAllowed(worktreePath, gitDir); err != nil {
+		return err
+	}
 	head, err := worktreeHead(worktreePath)
 	if err != nil {
 		return err
@@ -765,7 +801,7 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() err
 	if reason != "" || len(untracked) != 0 {
 		return fmt.Errorf("worktree is not provably clean: %s (%d untracked paths)", reason, len(untracked))
 	}
-	if !headContainedOnRemote(worktreePath) {
+	if !headContainedOnRemote(worktreePath, repoRoot) {
 		return fmt.Errorf("worktree HEAD is not provably backed by a live remote")
 	}
 	if beforeRemove != nil {
@@ -782,6 +818,9 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() err
 		return fmt.Errorf("worktree became dirty during removal verification: %s", reason)
 	}
 	if err := requireNoWorktreeOperation(gitDir); err != nil {
+		return err
+	}
+	if err := requireCleanRemovalAllowed(worktreePath, gitDir); err != nil {
 		return err
 	}
 	current, err := openRootUnchanged(worktreePath, identity)

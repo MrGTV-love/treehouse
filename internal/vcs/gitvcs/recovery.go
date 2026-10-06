@@ -93,12 +93,25 @@ func RecoveryHeadContained(dir, base string) bool {
 // headContainedOnRemote intersects locally readable tips with live advertised
 // remote refs, then checks all HEAD ancestry in one walk. Stale tracking refs,
 // local branches and unreachable remotes are never deletion evidence.
-func headContainedOnRemote(dir string) bool {
+func headContainedOnRemote(dir, ownerRoot string) bool {
+	grafts, err := gitPath(dir, "info/grafts")
+	if err != nil {
+		return false
+	}
+	if override := os.Getenv("GIT_GRAFT_FILE"); override != "" {
+		grafts = override
+		if !filepath.IsAbs(grafts) {
+			grafts = filepath.Join(dir, grafts)
+		}
+	}
+	if _, err := os.Lstat(grafts); !os.IsNotExist(err) {
+		return false
+	}
 	head, err := worktreeHead(dir)
 	if err != nil {
 		return false
 	}
-	local, err := runGitRaw(dir, "for-each-ref", "--format=%(objectname)", "refs/remotes", "refs/tags")
+	local, err := runGitRaw(dir, "for-each-ref", "--format=%(objectname)")
 	if err != nil {
 		return false
 	}
@@ -107,7 +120,7 @@ func headContainedOnRemote(dir string) bool {
 	for _, tip := range strings.Fields(string(local)) {
 		known[tip] = true
 	}
-	remotes, err := runGitRaw(dir, "remote")
+	remotes, err := runGitRaw(ownerRoot, "remote")
 	if err != nil {
 		return false
 	}
@@ -119,7 +132,7 @@ func headContainedOnRemote(dir string) bool {
 		if remote == "" {
 			continue
 		}
-		refs, err := runGitRaw(dir, "ls-remote", "--refs", remote)
+		refs, err := runGitRaw(ownerRoot, "ls-remote", "--refs", remote)
 		if err != nil {
 			continue
 		}
@@ -137,6 +150,6 @@ func headContainedOnRemote(dir string) bool {
 	if !backed {
 		return false
 	}
-	out, err := gitOutputEnv(dir, nil, revisions.Bytes(), "rev-list", "-n", "1", "--stdin", "--")
+	out, err := gitOutputEnv(dir, nil, revisions.Bytes(), "--no-replace-objects", "rev-list", "-n", "1", "--stdin", "--")
 	return err == nil && len(bytes.TrimSpace(out)) == 0
 }

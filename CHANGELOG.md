@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+* **pool:** resolve filesystem path aliases to one pool/slot identity, consolidate legacy recovered aliases without replacing live reservations or trusted seed inventories, and enforce live-process checks across case variants (GRE-1933).
+
 ## [3.1.2](https://github.com/kunchenguid/treehouse/compare/v3.1.1...v3.1.2) (2026-10-02)
 
 

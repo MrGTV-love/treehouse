@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/BurntSushi/toml"
+	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 	"github.com/kunchenguid/treehouse/v3/internal/vcs"
 )
 
@@ -228,6 +229,11 @@ func userConfigPath() string {
 }
 
 func ResolvePoolDir(repoRoot string, root string) (string, error) {
+	var err error
+	repoRoot, err = pathidentity.Prefix(repoRoot)
+	if err != nil {
+		return "", err
+	}
 	// Use remote URL for the hash when available; fall back to the
 	// absolute repo path for purely-local repositories.
 	hashInput, err := vcs.GetRemoteURL(repoRoot)
@@ -243,7 +249,7 @@ func ResolvePoolDir(repoRoot string, root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(poolRoot, poolName), nil
+	return pathidentity.Prefix(filepath.Join(poolRoot, poolName))
 }
 
 // ResolvePoolRoot resolves the directory that contains per-repository pools.
@@ -255,7 +261,7 @@ func ResolvePoolRoot(repoRoot string, root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(home, ".treehouse"), nil
+		return pathidentity.Prefix(filepath.Join(home, ".treehouse"))
 	}
 
 	expanded := os.ExpandEnv(root)
@@ -265,5 +271,5 @@ func ResolvePoolRoot(repoRoot string, root string) (string, error) {
 		}
 		expanded = filepath.Join(repoRoot, expanded)
 	}
-	return filepath.Join(expanded, ".treehouse"), nil
+	return pathidentity.Prefix(filepath.Join(expanded, ".treehouse"))
 }

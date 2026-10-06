@@ -20,7 +20,7 @@ func makeUnreadableMarkerWorktree(t *testing.T, poolDir, slot, repoName string) 
 	if err := os.Symlink(".git", filepath.Join(wtPath, ".git")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	return wtPath
+	return canonicalDir(t, wtPath)
 }
 
 // findEntryByPath returns a pointer to the WorktreeEntry at path, or nil.

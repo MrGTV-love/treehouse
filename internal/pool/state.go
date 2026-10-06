@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 	"github.com/kunchenguid/treehouse/v3/internal/vcs"
 )
 
@@ -116,6 +117,11 @@ func lockFilePath(poolDir string) string {
 // scan cannot complete, ReadState fails closed rather than returning an
 // incomplete state.
 func ReadState(poolDir string) (State, error) {
+	var err error
+	poolDir, err = pathidentity.Prefix(poolDir)
+	if err != nil {
+		return State{}, err
+	}
 	data, err := os.ReadFile(stateFilePath(poolDir))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -307,9 +313,11 @@ func validSeedInventory(paths []string) bool {
 // worktree succeeds but persisting its quarantine entry fails. Such a worktree
 // must remain unavailable even though the otherwise-valid state file omits it.
 func recoverMissingStateEntries(poolDir string, s State) (State, error) {
-	known := make(map[string]bool, len(s.Worktrees))
-	for _, wt := range s.Worktrees {
-		known[filepath.Clean(wt.Path)] = true
+	var known statePathIndex
+	var err error
+	s, known, err = normalizeStatePaths(s)
+	if err != nil {
+		return State{}, err
 	}
 
 	slots, err := os.ReadDir(poolDir)
@@ -330,10 +338,19 @@ func recoverMissingStateEntries(poolDir string, s State) (State, error) {
 				continue
 			}
 			wtPath := filepath.Join(slotDir, entry.Name())
-			if known[filepath.Clean(wtPath)] {
+			if _, ok := known.paths[wtPath]; ok {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return State{}, fmt.Errorf("reading pool slot identity %s: %w", wtPath, err)
+			}
+			if _, ok := known.find(wtPath, info); ok {
 				continue
 			}
 			if wt, ok := recoverOneWorktree(slot.Name(), wtPath); ok {
+				known.paths[wtPath] = len(s.Worktrees)
+				known.files = append(known.files, info)
 				s.Worktrees = append(s.Worktrees, wt)
 			}
 		}
@@ -412,33 +429,12 @@ func recoverOneWorktree(slotName, wtPath string) (WorktreeEntry, bool) {
 // naming the slot clears the lease; recovery lost the trusted inventory of
 // ignored files seeded into the worktree, so those files are not cleaned up.
 func recoverCorruptState(poolDir string, parseErr error) (State, error) {
-	slots, err := os.ReadDir(poolDir)
+	recovered, err := recoverMissingStateEntries(poolDir, State{})
 	if err != nil {
 		return State{}, fmt.Errorf("state file %s is corrupt or truncated (%v), and recovery could not scan pool directory: %w", stateFilePath(poolDir), parseErr, err)
 	}
-
-	var recovered []WorktreeEntry
-	for _, slot := range slots {
-		if !slot.IsDir() {
-			continue
-		}
-		slotDir := filepath.Join(poolDir, slot.Name())
-		nested, err := os.ReadDir(slotDir)
-		if err != nil {
-			return State{}, fmt.Errorf("state file %s is corrupt or truncated (%v), and recovery could not scan %s: %w", stateFilePath(poolDir), parseErr, slotDir, err)
-		}
-		for _, n := range nested {
-			if !n.IsDir() {
-				continue
-			}
-			wtPath := filepath.Join(slotDir, n.Name())
-			if wt, ok := recoverOneWorktree(slot.Name(), wtPath); ok {
-				recovered = append(recovered, wt)
-			}
-		}
-	}
 	fmt.Fprintf(os.Stderr, "treehouse: WARNING: state file %s is corrupt or truncated (%v); recovering worktrees found on disk as leased because their seeded-file inventory is unknown. See `treehouse status` for automatic recovery results and any slots that still need inspection.\n", stateFilePath(poolDir), parseErr)
-	return State{Worktrees: recovered}, nil
+	return recovered, nil
 }
 
 // WriteState persists the pool state file atomically: it writes to a temp file
@@ -446,6 +442,9 @@ func recoverCorruptState(poolDir string, parseErr error) (State, error) {
 // primitive, and syncs the parent directory where the platform supports that.
 func WriteState(poolDir string, s State) error {
 	s, err := prepareStateForWrite(poolDir, s)
+	if err == nil {
+		s, _, err = normalizeStatePaths(s)
+	}
 	if err != nil {
 		return err
 	}

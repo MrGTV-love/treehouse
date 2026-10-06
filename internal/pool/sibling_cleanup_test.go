@@ -115,14 +115,35 @@ func TestCleanupPreservesSiblingWorktree(t *testing.T) {
 				t.Errorf("sibling README = %q, %v; want %q", data, err, contents)
 			}
 			if tc.operation != "orphan" {
-				out, err := exec.Command("git", "-C", repoDir, "worktree", "list", "--porcelain").CombinedOutput()
+				out, err := exec.Command("git", "-C", repoDir, "worktree", "list", "--porcelain", "-z").CombinedOutput()
 				if err != nil {
 					t.Fatalf("listing Git worktrees: %v\n%s", err, out)
 				}
-				if !strings.Contains(string(out), "worktree "+sibling+"\n") {
+				siblingIdentity, err := canonicalPathPrefix(sibling)
+				if err != nil {
+					t.Fatal(err)
+				}
+				targetIdentity, err := canonicalPathPrefix(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var siblingRegistered, targetRegistered bool
+				for _, field := range strings.Split(string(out), "\x00") {
+					listedPath, ok := strings.CutPrefix(field, "worktree ")
+					if !ok {
+						continue
+					}
+					identity, err := canonicalPathPrefix(filepath.FromSlash(listedPath))
+					if err != nil {
+						t.Fatalf("resolving Git registration %q: %v", listedPath, err)
+					}
+					siblingRegistered = siblingRegistered || identity == siblingIdentity
+					targetRegistered = targetRegistered || identity == targetIdentity
+				}
+				if !siblingRegistered {
 					t.Errorf("sibling registration missing:\n%s", out)
 				}
-				if strings.Contains(string(out), "worktree "+target+"\n") {
+				if targetRegistered {
 					t.Errorf("target registration remains:\n%s", out)
 				}
 			}

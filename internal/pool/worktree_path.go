@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 )
 
 // Placeholders a worktree path template may use. {pool} and {repo_parent}
@@ -247,12 +249,10 @@ func checkWorktreePlacement(template, resolved, repoRoot, poolDir, slot string) 
 			return fmt.Errorf("worktree path %q resolves to %q; inside the pool directory it must be %s/%s/<name> so pool state can be recovered from disk",
 				template, resolved, placeholderPool, placeholderSlot)
 		}
-		// State records the requested spelling while recovery scans the
-		// configured pool directory, so an in-pool worktree reached by another
-		// spelling (a symlink into the pool) is found twice: once as its recorded
-		// entry and once as a recovered one for the same directory.
+		// Keep the in-pool template spelling rule: metadata authored at
+		// creation (including jj registrations) binds the requested path.
 		if !pathContainsLexically(poolDir, resolved) {
-			return fmt.Errorf("worktree path %q resolves to %q, which reaches the pool directory %q by another name; spell an in-pool path through the pool directory itself (use %s) so pool state and recovery agree on one path",
+			return fmt.Errorf("worktree path %q resolves to %q, which reaches the pool directory %q by another name; spell an in-pool path through the pool directory itself (use %s)",
 				template, resolved, poolDir, placeholderPool)
 		}
 		return nil
@@ -297,26 +297,7 @@ func enclosingPoolDir(path string) string {
 // ancestors lead. Anything other than a missing component fails closed rather
 // than falling back to the lexical path.
 func canonicalPathPrefix(path string) (string, error) {
-	current := filepath.Clean(path)
-	missing := ""
-	for {
-		resolved, err := filepath.EvalSymlinks(current)
-		if err == nil {
-			if missing == "" {
-				return resolved, nil
-			}
-			return filepath.Join(resolved, missing), nil
-		}
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", fmt.Errorf("no existing directory found above %s", path)
-		}
-		missing = filepath.Join(filepath.Base(current), missing)
-		current = parent
-	}
+	return pathidentity.Prefix(path)
 }
 
 // pathContains reports whether parent is child itself or holds it somewhere

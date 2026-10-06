@@ -444,9 +444,9 @@ func resolveReturnTarget(args []string) (returnTarget, error) {
 		return returnTarget{}, err
 	}
 
-	poolDir, pathErr := resolveReturnPoolDir(wtPath, len(args) > 0)
+	target, pathErr := resolveReturnPath(wtPath, len(args) > 0)
 	if pathErr == nil {
-		return returnTarget{path: wtPath, poolDir: poolDir}, nil
+		return target, nil
 	}
 	if len(args) == 0 || !errors.Is(pathErr, errReturnWorktreeUnmanaged) || !couldBeWorktreeName(args[0]) {
 		if errors.Is(pathErr, errReturnWorktreeUnmanaged) {
@@ -564,7 +564,7 @@ func poolDirForRepoRoot(repoRoot string) (string, error) {
 	return config.ResolvePoolDir(repoRoot, config.ResolveRoot(rootFlag, cfg))
 }
 
-func resolveReturnPoolDir(wtPath string, explicitPath bool) (string, error) {
+func resolveReturnPath(wtPath string, explicitPath bool) (returnTarget, error) {
 	// The built-in layout puts a worktree two levels under its pool, which lets a
 	// return succeed even when the repository is gone. The candidate is confirmed
 	// to be a pool first, exactly as destroy does: a worktree_path worktree lives
@@ -573,10 +573,10 @@ func resolveReturnPoolDir(wtPath string, explicitPath bool) (string, error) {
 	if pathPoolDir := filepath.Dir(filepath.Dir(wtPath)); pool.IsPoolDir(pathPoolDir) {
 		entry, err := pool.FindByPath(pathPoolDir, wtPath)
 		if err != nil {
-			return "", err
+			return returnTarget{}, err
 		}
 		if entry != nil {
-			return pathPoolDir, nil
+			return returnTarget{path: entry.Path, poolDir: pathPoolDir}, nil
 		}
 	}
 
@@ -589,22 +589,22 @@ func resolveReturnPoolDir(wtPath string, explicitPath bool) (string, error) {
 	}
 	if err != nil {
 		if explicitPath {
-			return "", errReturnWorktreeUnmanaged
+			return returnTarget{}, errReturnWorktreeUnmanaged
 		}
-		return "", fmt.Errorf("not in a git or jj repository: %w", err)
+		return returnTarget{}, fmt.Errorf("not in a git or jj repository: %w", err)
 	}
 
 	fallbackPoolDir, err := poolDirForRepoRoot(repoRoot)
 	if err != nil {
-		return "", err
+		return returnTarget{}, err
 	}
 
 	entry, err := pool.FindByPath(fallbackPoolDir, wtPath)
 	if err != nil {
-		return "", err
+		return returnTarget{}, err
 	}
 	if entry == nil {
-		return "", errReturnWorktreeUnmanaged
+		return returnTarget{}, errReturnWorktreeUnmanaged
 	}
-	return fallbackPoolDir, nil
+	return returnTarget{path: entry.Path, poolDir: fallbackPoolDir}, nil
 }

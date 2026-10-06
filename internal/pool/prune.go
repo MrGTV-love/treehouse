@@ -502,7 +502,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 		for _, reservation := range reserved {
 			idx := -1
 			for i := range state.Worktrees {
-				if state.Worktrees[i].Path == reservation.Path {
+				if samePath(state.Worktrees[i].Path, reservation.Path) {
 					idx = i
 					break
 				}

@@ -158,7 +158,7 @@ func DestroyWorktree(poolDir, worktreePath string, opts DestroyOptions) (Destroy
 			return err
 		}
 		for i := range state.Worktrees {
-			if state.Worktrees[i].Path == worktreePath {
+			if samePath(state.Worktrees[i].Path, worktreePath) {
 				entry := state.Worktrees[i]
 				target = &entry
 				break
@@ -462,7 +462,7 @@ func executeDestroy(poolDir string, removable []DestroyTarget, resolveContext pr
 		for _, reservation := range reserved {
 			idx := -1
 			for i := range state.Worktrees {
-				if state.Worktrees[i].Path == reservation.worktree.Path {
+				if samePath(state.Worktrees[i].Path, reservation.worktree.Path) {
 					idx = i
 					break
 				}

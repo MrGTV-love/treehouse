@@ -2,7 +2,8 @@
 # Place repo-safe settings at <repo_root>/treehouse.toml.
 # Place executable hooks only in ~/.config/treehouse/config.toml.
 
-# Maximum number of worktrees in the pool
+# Maximum total number of worktrees in the shared pool, not per clone.
+# See README.md#configuration for clone reuse and foreign-slot reclamation policy.
 max_trees = 16
 
 # Optional worktree root directory.
@@ -60,6 +61,10 @@ max_trees = 16
 # TREEHOUSE_WORKTREE_PATH env var (precedence: --worktree-path >
 # TREEHOUSE_WORKTREE_PATH > this file > user config > default).
 # worktree_path = "{repo_parent}/{repo}-{slot}"
+
+# Optional tracked-file sharing: "off" (default) or "fresh".
+# See README: APFS copy-on-write sharing for safety requirements and precedence.
+# apfs_sharing = "fresh"
 
 # Version-control backend selection. Git is the default everywhere. Set
 # "jj" to opt in to the experimental Jujutsu backend for this repository

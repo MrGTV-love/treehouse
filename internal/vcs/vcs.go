@@ -31,8 +31,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/kunchenguid/treehouse/internal/vcs/gitvcs"
-	"github.com/kunchenguid/treehouse/internal/vcs/jjvcs"
+	"github.com/kunchenguid/treehouse/v3/internal/vcs/gitvcs"
+	"github.com/kunchenguid/treehouse/v3/internal/vcs/jjvcs"
 )
 
 // Backend is the set of version-control operations treehouse's lifecycle
@@ -243,6 +243,16 @@ func normalizeVCSNameFrom(source, v string) string {
 	return ""
 }
 
+// RecoveryWorktree verifies a Git checkout and returns only root-level untracked paths.
+func RecoveryWorktree(path string) ([]string, string) {
+	return gitvcs.RecoveryWorktree(path)
+}
+
+// RecoveryHeadContained checks whether HEAD is reachable from a remote ref or base.
+func RecoveryHeadContained(path, base string) bool {
+	return gitvcs.RecoveryHeadContained(path, base)
+}
+
 // FindRepoRoot returns the repository or worktree root for the current
 // working directory.
 func FindRepoRoot() (string, error) { return backendFor("").FindRepoRootFrom("") }
@@ -340,6 +350,73 @@ func VerifyBaseBranch(repoRoot, branch string) error {
 	return nil
 }
 
+func ValidateBranchName(repoRoot, branch string) error {
+	if backendFor(repoRoot).Name() != "git" {
+		return fmt.Errorf("branch validation requires the git backend")
+	}
+	return gitvcs.ValidateBranchName(repoRoot, branch)
+}
+
+func BranchCommit(repoRoot, branch string) (string, error) {
+	if backendFor(repoRoot).Name() != "git" {
+		return "", fmt.Errorf("branch commit resolution requires the git backend")
+	}
+	return gitvcs.BranchCommit(repoRoot, branch)
+}
+
+func WorktreeAtCommit(worktreePath, commit string) (bool, error) {
+	name, err := WorktreeBackendNameChecked(worktreePath)
+	if err != nil {
+		return false, err
+	}
+	if name != "git" {
+		return false, fmt.Errorf("commit verification requires a git worktree")
+	}
+	return gitvcs.WorktreeAtCommit(worktreePath, commit)
+}
+
+func LocalBranchExists(repoRoot, branch string) (bool, error) {
+	if backendFor(repoRoot).Name() != "git" {
+		return false, fmt.Errorf("local branch lookup requires the git backend")
+	}
+	return gitvcs.LocalBranchExists(repoRoot, branch)
+}
+
+// ErrBranchCreated identifies a failed checkout after Git created the branch.
+// Callers must preserve the worktree for possible post-checkout hook output.
+var ErrBranchCreated = gitvcs.ErrBranchCreated
+
+// CreateBranch creates and checks out a new Git branch at worktreePath's
+// current HEAD. Branch creation is deliberately Git-only; jj bookmarks have
+// different ownership semantics and are not implied by this operation.
+func CreateBranch(worktreePath, branch string) error {
+	name, err := WorktreeBackendNameChecked(worktreePath)
+	if err != nil {
+		return err
+	}
+	if name != "git" {
+		if name == "" {
+			return fmt.Errorf("cannot create branch in %s: worktree has no .git marker", worktreePath)
+		}
+		return fmt.Errorf("cannot create branch in %s: branch creation requires a git worktree, found %s", worktreePath, name)
+	}
+	return gitvcs.CreateBranch(worktreePath, branch)
+}
+
+// HasUnseededBranchCreationOutput inspects a recycled slot after branch
+// creation fails without running checkout. Post-checkout hooks cannot have run
+// on this path, but reference-transaction hooks can have written output.
+func HasUnseededBranchCreationOutput(worktreePath string, seededPaths []string) (bool, error) {
+	name, err := WorktreeBackendNameChecked(worktreePath)
+	if err != nil {
+		return true, err
+	}
+	if name != "git" {
+		return true, nil
+	}
+	return gitvcs.HasUnseededBranchCreationOutput(worktreePath, seededPaths)
+}
+
 // AddWorktree creates a new worktree at path based on branch.
 func AddWorktree(repoRoot, path, branch string) error {
 	return backendFor(repoRoot).AddWorktree(repoRoot, path, branch)
@@ -357,6 +434,19 @@ func RemoveWorktree(repoRoot, path string) error {
 // RemoveCleanWorktree removes a worktree, refusing if it is not clean.
 func RemoveCleanWorktree(repoRoot, path string) error {
 	return backendForRemoval(repoRoot, path).RemoveCleanWorktree(repoRoot, path)
+}
+
+// ErrWorktreeNotDisposable is a safety refusal before automatic removal starts.
+var ErrWorktreeNotDisposable = gitvcs.ErrWorktreeNotDisposable
+
+// RemoveLandedWorktree removes only a clean linked Git worktree whose commits
+// are still reachable on a remote. beforeRemove runs with HEAD locked so the
+// pool can make its final process and ownership checks before deletion.
+func RemoveLandedWorktree(repoRoot, path string, seededPaths []string, beforeRemove func() error) error {
+	if WorktreeBackendName(path) != "git" {
+		return fmt.Errorf("%w: automatic reclamation requires a Git worktree", ErrWorktreeNotDisposable)
+	}
+	return gitvcs.RemoveLandedWorktree(repoRoot, path, seededPaths, beforeRemove)
 }
 
 // slotMarkerBackend reports the backend a worktree's own marker names: a

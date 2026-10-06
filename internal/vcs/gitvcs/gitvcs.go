@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -235,6 +236,97 @@ func isAncestor(repoRoot, a, b string) bool {
 func AddWorktree(repoRoot, path, branch string) error {
 	_, err := runGit(repoRoot, "worktree", "add", "--detach", path, branchRef(repoRoot, branch))
 	return err
+}
+
+func BranchCommit(repoRoot, branch string) (string, error) {
+	return runGit(repoRoot, "rev-parse", "--verify", branchRef(repoRoot, branch)+"^{commit}")
+}
+
+func WorktreeAtCommit(worktreePath, commit string) (bool, error) {
+	head, err := worktreeHead(worktreePath)
+	if err != nil {
+		return false, err
+	}
+	branch, err := CheckedOutBranch(worktreePath)
+	return err == nil && branch == "" && head == commit, err
+}
+
+func ValidateBranchName(repoRoot, branch string) error {
+	name, err := runGit(repoRoot, "check-ref-format", "--branch", branch)
+	if err != nil {
+		return err
+	}
+	if name != branch {
+		return fmt.Errorf("branch name %q expands to %q", branch, name)
+	}
+	return nil
+}
+
+func LocalBranchExists(repoRoot, branch string) (bool, error) {
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Dir = repoRoot
+	if err := cmd.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// ErrBranchCreated marks checkout failures after this invocation created the
+// branch. The worktree may contain hook output and must not be force-removed.
+var ErrBranchCreated = errors.New("branch created before checkout failed")
+
+// CreateBranch creates and checks out branch at the worktree's current HEAD.
+func CreateBranch(worktreePath, branch string) error {
+	return createBranch(worktreePath, branch, func(dir string, args ...string) (string, error) {
+		if args[0] == "checkout" {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return strings.TrimSpace(string(out)), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+		return runGit(dir, args...)
+	})
+}
+
+func createBranch(worktreePath, branch string, run func(string, ...string) (string, error)) error {
+	// A successful `git branch` proves this invocation created the ref: Git
+	// refuses an existing name, including one created concurrently.
+	expectedHead, err := run(worktreePath, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return err
+	}
+	if _, err := run(worktreePath, "branch", "--", branch, expectedHead); err != nil {
+		return err
+	}
+	checkoutOutput, checkoutErr := run(worktreePath, "checkout", branch)
+	if checkoutErr != nil && checkoutOutput != "" {
+		checkoutErr = fmt.Errorf("%w\n%s", checkoutErr, checkoutOutput)
+	}
+	// Exit status alone is not authoritative: a post-checkout hook can fail
+	// after checkout or succeed after switching HEAD to another branch.
+	// Both the symbolic branch and commit must still match the acquisition.
+	// A hook can advance the branch without changing its name.
+	checkedOut, checkedOutErr := run(worktreePath, "symbolic-ref", "-q", "--short", "HEAD")
+	head, headErr := run(worktreePath, "rev-parse", "--verify", "HEAD^{commit}")
+	if checkedOutErr == nil && checkedOut == branch && headErr == nil && head == expectedHead {
+		if checkoutErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: checkout of branch %q completed despite an error: %v\n", branch, checkoutErr)
+		}
+		return nil
+	}
+	if checkoutErr == nil {
+		checkoutErr = fmt.Errorf("checkout of branch %q did not leave HEAD on that branch at commit %s", branch, expectedHead)
+		if checkoutOutput != "" {
+			checkoutErr = fmt.Errorf("%w\n%s", checkoutErr, checkoutOutput)
+		}
+	}
+	return fmt.Errorf("%w: %w (branch %q was created and left in place for manual inspection/removal)", ErrBranchCreated, checkoutErr, branch)
 }
 
 // PruneWorktrees removes git worktree bookkeeping for worktrees whose
@@ -602,6 +694,227 @@ func RemoveWorktree(repoRoot, path string) error {
 func RemoveCleanWorktree(repoRoot, path string) error {
 	_, err := runGit(repoRoot, "worktree", "remove", path)
 	return err
+}
+
+// ErrWorktreeNotDisposable identifies a refusal before any deletion is attempted.
+var ErrWorktreeNotDisposable = errors.New("worktree is not provably disposable")
+
+// requireNoWorktreeOperation inspects the linked worktree's own Git directory,
+// not the shared common directory. A clean index does not imply an idle Git
+// operation: paused merges and rebases can have no file changes at all.
+func requireNoWorktreeOperation(gitDir string) error {
+	for _, marker := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer", "BISECT_START"} {
+		_, err := os.Lstat(filepath.Join(gitDir, marker))
+		if err == nil {
+			return fmt.Errorf("worktree has a Git operation in progress (%s)", marker)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot verify worktree operation state (%s): %w", marker, err)
+		}
+	}
+	return nil
+}
+
+func requireCleanRemovalAllowed(worktreePath, gitDir string, seededPaths []string) error {
+	replacements, err := runGitRaw(worktreePath, "replace", "--list")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree replacement refs: %w", err)
+	}
+	if len(replacements) != 0 {
+		return fmt.Errorf("worktree has Git replacement refs")
+	}
+	ignored, err := runGitRaw(worktreePath, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree ignored paths: %w", err)
+	}
+	known := make(map[string]struct{}, len(seededPaths))
+	for _, name := range seededPaths {
+		known[name] = struct{}{}
+	}
+	for _, name := range recoveryNUL(ignored) {
+		if _, ok := known[name]; !ok {
+			return fmt.Errorf("worktree has an unseeded ignored path (%s)", name)
+		}
+	}
+	for _, marker := range []string{"locked", "modules"} {
+		_, err := os.Lstat(filepath.Join(gitDir, marker))
+		if err == nil {
+			return fmt.Errorf("worktree has removal-protected metadata (%s)", marker)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot verify worktree removal metadata (%s): %w", marker, err)
+		}
+	}
+	stages, err := runGitRaw(worktreePath, "ls-files", "--stage", "-z")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree submodules: %w", err)
+	}
+	for _, entry := range recoveryNUL(stages) {
+		if !strings.HasPrefix(entry, "160000 ") {
+			continue
+		}
+		_, name, ok := strings.Cut(entry, "\t")
+		if !ok {
+			return fmt.Errorf("cannot verify worktree submodule entry")
+		}
+		_, err := os.Lstat(filepath.Join(worktreePath, filepath.FromSlash(name), ".git"))
+		if err == nil {
+			return fmt.Errorf("worktree has an initialized submodule (%s)", name)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot verify worktree submodule (%s): %w", name, err)
+		}
+	}
+	return nil
+}
+
+// RemoveLandedWorktree holds Git's HEAD lock through verification and clean
+// removal. Unlike prune's base-branch check, only live remote refs may protect
+// these commits: a branch in the clone being reclaimed is not a remote backup.
+func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, beforeRemove func() error) (err error) {
+	removing := false
+	defer func() {
+		if err != nil && !removing {
+			err = fmt.Errorf("%w: %v", ErrWorktreeNotDisposable, err)
+		}
+	}()
+	root, err := os.OpenRoot(worktreePath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	identity, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	if err := authenticateLinkedWorktree(root, worktreePath); err != nil {
+		return err
+	}
+	headPath, err := gitPath(worktreePath, "HEAD")
+	if err != nil {
+		return err
+	}
+	lockPath := headPath + ".lock"
+	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+	if err != nil {
+		return fmt.Errorf("cannot lock worktree HEAD: %w", err)
+	}
+	// Close before removal: Windows cannot remove an open lock file.
+	if err := lock.Close(); err != nil {
+		_ = os.Remove(lockPath)
+		return err
+	}
+	defer os.Remove(lockPath)
+	gitDir := filepath.Dir(headPath)
+	if err := requireNoWorktreeOperation(gitDir); err != nil {
+		return err
+	}
+	if err := requireCleanRemovalAllowed(worktreePath, gitDir, seededPaths); err != nil {
+		return err
+	}
+	head, err := worktreeHead(worktreePath)
+	if err != nil {
+		return err
+	}
+
+	untracked, reason := RecoveryWorktree(worktreePath)
+	if reason != "" || len(untracked) != 0 {
+		return fmt.Errorf("worktree is not provably clean: %s (%d untracked paths)", reason, len(untracked))
+	}
+	if !headContainedOnRemote(worktreePath, repoRoot) {
+		return fmt.Errorf("worktree HEAD is not provably backed by a live remote")
+	}
+	if beforeRemove != nil {
+		if err := beforeRemove(); err != nil {
+			return err
+		}
+	}
+	currentHead, err := worktreeHead(worktreePath)
+	if err != nil || currentHead != head {
+		return fmt.Errorf("worktree HEAD changed during removal verification")
+	}
+	untracked, reason = RecoveryWorktree(worktreePath)
+	if reason != "" || len(untracked) != 0 {
+		return fmt.Errorf("worktree became dirty during removal verification: %s", reason)
+	}
+	if err := requireNoWorktreeOperation(gitDir); err != nil {
+		return err
+	}
+	if err := requireCleanRemovalAllowed(worktreePath, gitDir, seededPaths); err != nil {
+		return err
+	}
+	current, err := openRootUnchanged(worktreePath, identity)
+	if err != nil {
+		return err
+	}
+	if err := authenticateLinkedWorktree(current, worktreePath); err != nil {
+		current.Close()
+		return err
+	}
+	current.Close()
+	// Release directory handles before Git removes the tree on Windows.
+	root.Close()
+	removing = true
+	return RemoveCleanWorktree(repoRoot, worktreePath)
+}
+
+// HasUnseededBranchCreationOutput ignores checkout-hook uncertainty when no
+// checkout ran, but inspects reference-transaction hooks and worktree output.
+func HasUnseededBranchCreationOutput(worktreePath string, seededPaths []string) (bool, error) {
+	// A configured hooks path can be relative to the invocation directory.
+	hooksPath := exec.Command("git", "config", "--get", "core.hooksPath")
+	hooksPath.Dir = worktreePath
+	var configuredHooksPath string
+	if out, err := hooksPath.Output(); err == nil {
+		configuredHooksPath = strings.TrimSpace(string(out))
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		return true, err
+	}
+	var hook string
+	if configuredHooksPath != "" {
+		hook = filepath.Join(configuredHooksPath, "reference-transaction")
+	} else {
+		var err error
+		hook, err = runGit(worktreePath, "rev-parse", "--git-path", "hooks/reference-transaction")
+		if err != nil {
+			return true, err
+		}
+	}
+	if !filepath.IsAbs(hook) {
+		hook = filepath.Join(worktreePath, hook)
+	}
+	if info, err := os.Stat(hook); err == nil {
+		// Windows does not expose executable permission bits, but Git for
+		// Windows still runs hook scripts found at this path.
+		if info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode().Perm()&0111 != 0) {
+			return true, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return true, err
+	}
+
+	known := make(map[string]struct{}, len(seededPaths))
+	for _, name := range seededPaths {
+		known[name] = struct{}{}
+	}
+	for _, args := range [][]string{
+		{"ls-files", "-z", "--others", "--exclude-standard"},
+		{"ls-files", "-z", "--others", "--ignored", "--exclude-standard"},
+	} {
+		out, err := gitOutputEnv(worktreePath, nil, nil, args...)
+		if err != nil {
+			return true, err
+		}
+		for _, name := range bytes.Split(bytes.TrimSuffix(out, []byte{0}), []byte{0}) {
+			if len(name) == 0 {
+				continue
+			}
+			if _, ok := known[string(name)]; !ok {
+				return true, nil
+			}
+		}
+	}
+	return IsDirty(worktreePath)
 }
 
 func Fetch(repoRoot string) error {

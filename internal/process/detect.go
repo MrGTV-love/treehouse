@@ -86,7 +86,7 @@ func WorktreeContainsCwd(worktreePath, cwd string) bool {
 }
 
 // cwdWithinWorktree reports whether a process working directory falls inside the
-// worktree root, which must already be absolute and symlink-resolved. An empty
+// worktree root, which must already be absolute and filesystem-resolved. An empty
 // cwd never matches: gopsutil returns "" (with no error) for processes whose
 // working directory cannot be read - notably Windows system processes such as
 // System and csrss.exe - and filepath.Abs("") would otherwise resolve to the

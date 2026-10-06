@@ -292,8 +292,8 @@ func enclosingPoolDir(path string) string {
 }
 
 // canonicalPathPrefix resolves the deepest existing ancestor of path through
-// symlinks and re-appends the components that do not exist yet, because a path
-// treehouse is about to create can only be judged by where its existing
+// symlinks and filesystem spelling, then re-appends the missing components.
+// A path treehouse is about to create can only be judged by where its existing
 // ancestors lead. Anything other than a missing component fails closed rather
 // than falling back to the lexical path.
 func canonicalPathPrefix(path string) (string, error) {

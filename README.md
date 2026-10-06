@@ -527,6 +527,8 @@ The repo-level config takes precedence for repo-safe settings.
 `treehouse prune --all` can run without a repository, so it uses only the user-level config and does not read per-repo `treehouse.toml` files while sweeping.
 If no config is found, the default pool size is 16.
 
+Pool names use the filesystem-resolved repository directory name and a short hash of the origin URL (or the resolved repository path when no remote is available).
+
 `max_trees` remains a **shared-pool cap**, not a per-clone allowance. Same-named
 clones with the same origin URL and pool root share that budget; all registered
 slots count, including another clone's idle slots. Acquisition only reuses the
@@ -666,9 +668,9 @@ export TREEHOUSE_WORKTREE_PATH='{repo_parent}/{repo}-{slot}'
 | Placeholder | Expands to |
 |---|---|
 | `{slot}` | The slot name (`1`, `2`, …). **Required** — without it every slot resolves to one directory. |
-| `{repo}` | The repository directory's name |
-| `{repo_parent}` | The directory holding the repository |
-| `{pool}` | This repository's pool directory |
+| `{repo}` | The filesystem-resolved repository directory's name |
+| `{repo_parent}` | The parent of the filesystem-resolved repository root |
+| `{pool}` | This repository's resolved pool directory |
 
 One of `{pool}` or `{repo}` is also required, because slot names are allocated per pool: a user-level `$HOME/trees/{slot}` would send the first slot of *every* repository to `$HOME/trees/1`. `{repo_parent}` does not count — two repositories side by side expand it to the same directory, so `{repo_parent}/{slot}` collides exactly the same way. It stays available as a placeholder; it just has to be paired, as in `{repo_parent}/{repo}-{slot}`.
 The template must resolve to an absolute path, so anchor it on `{pool}`, `{repo_parent}`, or an absolute prefix of your own: a bare `{repo}-{slot}` is rejected rather than resolved against whichever directory you happened to run `get` from.
@@ -725,7 +727,7 @@ The worktree root can also be set without a config file, and the resolved value 
 4. `root` in the user-level `~/.config/treehouse/config.toml`
 5. The default, `~/.treehouse`
 
-A relative value (including `.`) is resolved from the repo root, exactly like a relative `root` in config; `treehouse` is always appended, so `--root .` places the pool at `<repo>/.treehouse/`.
+A relative value (including `.`) is resolved from the repo root, exactly like a relative `root` in config; `.treehouse` is always appended, so `--root .` places the pool at `<repo>/.treehouse/`. Root resolution follows symlinks and uses the filesystem spelling of the deepest existing prefix, retaining the requested spelling of components not yet created.
 
 ### In-project storage
 

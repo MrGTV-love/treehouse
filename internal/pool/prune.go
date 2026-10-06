@@ -878,12 +878,10 @@ func removeWorktreeDirectory(poolDir, worktreePath string) error {
 // other files can share it.
 //
 // Ownership is decided on canonicalized paths, exactly as placement decides it:
-// a recorded path that reaches its parent through a symlink out of the pool
-// still reads as pool-owned lexically, and os.RemoveAll on it would follow the
-// link and take everything beside the worktree in the real directory. The path
-// returned is the recorded spelling, which is what has to be deleted. A path
-// that cannot be resolved is an error, so callers skip the removal rather than
-// widen it.
+// a recorded parent reached through a symlink out of the pool can look pool-owned
+// lexically without being owned physically. Keep the recorded spelling for the
+// optional empty-parent removal; never remove an external parent. A path that
+// cannot be resolved is an error, so callers skip removal rather than widen it.
 //
 // A worktree placed directly under a filesystem or drive root has a parent
 // that is never a pool slot directory, so only the worktree is removable.
@@ -906,9 +904,9 @@ func removableWorktreeContainer(poolDir, worktreePath string) (string, error) {
 	return container, nil
 }
 
-// containerIsPoolOwned reports whether container is a slot directory the pool
-// created for one worktree: inside the pool directory, and not the pool
-// directory itself, which holds the pool's state.
+// containerIsPoolOwned reports whether container is inside the pool directory,
+// but not the pool directory itself, which holds the pool's state. Ownership
+// permits only empty-directory cleanup, not recursive removal.
 func containerIsPoolOwned(poolDir, container string) (bool, error) {
 	canonicalPool, err := canonicalPathPrefix(poolDir)
 	if err != nil {

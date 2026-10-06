@@ -148,7 +148,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 - **Choosable base branch** — set `base_branch` in `treehouse.toml`, or pass `treehouse get --base <branch>`, to cut worktrees from a branch other than the repository default. Opt-in; unset keeps today's inference. This composes with `--branch`: the new branch starts at the selected base.
 - **Unique worktree directory names** — pass `treehouse get --unique-leaf` (or set `unique_leaf` in `treehouse.toml`) to name new slots `<repo>-<slot>` instead of `<repo>`, so tooling that derives per-checkout identity from the directory name tells the slots apart. Opt-in; off keeps today's layout, and existing worktrees are never moved.
 - **Choosable worktree path** — set `worktree_path` in `treehouse.toml`, or pass `treehouse get --worktree-path '<template>'`, to place new worktrees somewhere a tool requires instead of `{pool}/{slot}/{repo}`. Opt-in, and creation-only: worktrees already in the pool keep their recorded paths. See [Worktree path](#worktree-path).
-- **Clone-correct reuse** — two local clones of the same remote share one pool, but a worktree is only ever reused by the clone it belongs to, judged by its physical Git common directory (symlinked or, on a case-insensitive filesystem, differently cased paths to one clone count as that clone). If nothing reusable is left, `get` creates a new worktree up to `max_trees`. At the cap, it can safely remove one idle, unleased, clean foreign Git worktree whose commits are backed by live remote refs, then create a fresh worktree for the calling clone. Otherwise acquisition fails without handing out another clone's tree. Unverifiable clone identities are never reused or automatically reclaimed. Non-colocated jj repositories have no Git common directory, so their worktrees are never reused; `get` creates a new one each time until `max_trees` is reached. Automatic foreign-slot reclamation is Git-only.
+- **Clone-correct reuse** — two local clones of the same remote share one pool, but a worktree is only ever reused by the clone it belongs to, judged by its physical Git common directory (symlinked or, on a case-insensitive filesystem, differently cased paths to one clone count as that clone). If nothing reusable is left, `get` creates a new worktree up to `max_trees`. At the cap, it can safely remove one idle, unleased, clean foreign Git worktree whose commits are backed by live remote refs, then create a fresh worktree for the calling clone. Reclamation refuses Git replacement refs and ignored files outside the exact authenticated seeded-file inventory; generic ignored caches or local configuration are not disposable. Otherwise acquisition fails without handing out another clone's tree. Unverifiable clone identities are never reused or automatically reclaimed. Non-colocated jj repositories have no Git common directory, so their worktrees are never reused; `get` creates a new one each time until `max_trees` is reached. Automatic foreign-slot reclamation is Git-only.
 - **Opt-in APFS sharing** - share identical large tracked files with the main checkout using independent copy-on-write clones. Default off, macOS/APFS and fresh Git slots only; existing slots and ignored output are never swept. See [APFS copy-on-write sharing](#apfs-copy-on-write-sharing).
 - **No daemon** - all operations are inline CLI commands.
   Pool state is a small on-disk file, written under a lock by each command.
@@ -538,9 +538,12 @@ base branch or stale remote-tracking ref is not sufficient deletion evidence.
 If no foreign slot qualifies, or the pool is already above the effective cap,
 acquisition fails. Reuse of a safe own-clone slot still works at the cap.
 
-Automatic reclamation removes the old checkout and its ignored build/cache
-files using Git's non-forced clean-worktree removal; it never migrates a
-worktree between clones. Files beside the old checkout are left alone. The
+Automatic reclamation removes the old checkout using Git's non-forced
+clean-worktree removal. Ignored files may be deleted only when every path is
+in the authenticated seeded-file inventory; unseeded ignored configuration,
+build output, and caches prevent reclamation. Git replacement refs also
+prevent reclamation. Worktrees are never migrated between clones, and files
+beside the old checkout are left alone. The
 deletion is recorded before creating the replacement, so a later creation
 failure leaves a freed slot rather than a foreign slot consuming the budget.
 

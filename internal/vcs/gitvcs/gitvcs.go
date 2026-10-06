@@ -715,7 +715,27 @@ func requireNoWorktreeOperation(gitDir string) error {
 	return nil
 }
 
-func requireCleanRemovalAllowed(worktreePath, gitDir string) error {
+func requireCleanRemovalAllowed(worktreePath, gitDir string, seededPaths []string) error {
+	replacements, err := runGitRaw(worktreePath, "replace", "--list")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree replacement refs: %w", err)
+	}
+	if len(replacements) != 0 {
+		return fmt.Errorf("worktree has Git replacement refs")
+	}
+	ignored, err := runGitRaw(worktreePath, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree ignored paths: %w", err)
+	}
+	known := make(map[string]struct{}, len(seededPaths))
+	for _, name := range seededPaths {
+		known[name] = struct{}{}
+	}
+	for _, name := range recoveryNUL(ignored) {
+		if _, ok := known[name]; !ok {
+			return fmt.Errorf("worktree has an unseeded ignored path (%s)", name)
+		}
+	}
 	for _, marker := range []string{"locked", "modules"} {
 		_, err := os.Lstat(filepath.Join(gitDir, marker))
 		if err == nil {
@@ -751,7 +771,7 @@ func requireCleanRemovalAllowed(worktreePath, gitDir string) error {
 // RemoveLandedWorktree holds Git's HEAD lock through verification and clean
 // removal. Unlike prune's base-branch check, only live remote refs may protect
 // these commits: a branch in the clone being reclaimed is not a remote backup.
-func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() error) (err error) {
+func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, beforeRemove func() error) (err error) {
 	removing := false
 	defer func() {
 		if err != nil && !removing {
@@ -789,7 +809,7 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() err
 	if err := requireNoWorktreeOperation(gitDir); err != nil {
 		return err
 	}
-	if err := requireCleanRemovalAllowed(worktreePath, gitDir); err != nil {
+	if err := requireCleanRemovalAllowed(worktreePath, gitDir, seededPaths); err != nil {
 		return err
 	}
 	head, err := worktreeHead(worktreePath)
@@ -820,7 +840,7 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() err
 	if err := requireNoWorktreeOperation(gitDir); err != nil {
 		return err
 	}
-	if err := requireCleanRemovalAllowed(worktreePath, gitDir); err != nil {
+	if err := requireCleanRemovalAllowed(worktreePath, gitDir, seededPaths); err != nil {
 		return err
 	}
 	current, err := openRootUnchanged(worktreePath, identity)

@@ -399,6 +399,231 @@ func TestAcquire_ForeignReclamationRefusesRewrittenAncestry(t *testing.T) {
 	}
 }
 
+func TestAcquire_ForeignReclamationPreservesReplacementTree(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		for _, replacement := range []string{"default", "custom", "late-default", "late-custom"} {
+			t.Run(fmt.Sprintf("leased=%t/%s", leased, replacement), func(t *testing.T) {
+				foreign, caller, poolDir := setupSharedClonePool(t)
+				path := idleSlots(t, foreign, poolDir, 1)[0]
+				base := gitOut(t, path, "rev-parse", "HEAD")
+				if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("unpublished replacement tree\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, path, "add", "README.md")
+				runGit(t, path, "commit", "-m", "unpublished different tree D")
+				different := gitOut(t, path, "rev-parse", "HEAD")
+				namespace := "refs/replace/"
+				if strings.HasSuffix(replacement, "custom") {
+					namespace = "refs/treehouse-replacements/"
+				}
+				t.Setenv("GIT_REPLACE_REF_BASE", namespace)
+				calls := 0
+				if strings.HasPrefix(replacement, "late-") {
+					runGit(t, path, "reset", "--hard", base)
+					oldScan := findProcessesInWorktree
+					findProcessesInWorktree = func(candidate string) ([]process.ProcessInfo, error) {
+						if candidate != path {
+							return oldScan(candidate)
+						}
+						calls++
+						if calls == 2 {
+							runGit(t, path, "replace", base, different)
+							runGit(t, path, "read-tree", "--reset", "-u", base)
+						}
+						return nil, nil
+					}
+					t.Cleanup(func() { findProcessesInWorktree = oldScan })
+				} else {
+					runGit(t, path, "replace", base, different)
+					runGit(t, path, "reset", "--hard", base)
+					if status := gitOut(t, path, "status", "--porcelain", "--untracked-files=all"); status != "" {
+						t.Fatalf("replacement fixture must appear clean: %s", status)
+					}
+					assertFileContents(t, filepath.Join(path, "README.md"), "unpublished replacement tree\n")
+				}
+				before, err := ReadState(poolDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := acquireReclamationCaller(caller, poolDir, 1, leased, true)
+				if err == nil || got != "" {
+					t.Fatalf("reclaimed remote HEAD with an unpublished replacement tree: path=%q err=%v", got, err)
+				}
+				after, err := ReadState(poolDir)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("refusal changed pool state: %#v -> %#v (%v)", before, after, err)
+				}
+				assertCloneCommonDir(t, path, foreign)
+				assertFileContents(t, filepath.Join(path, "README.md"), "unpublished replacement tree\n")
+				if got := gitOut(t, path, "rev-parse", "HEAD"); got != base {
+					t.Fatalf("refusal changed foreign HEAD: %s != %s", got, base)
+				}
+				if got := gitOut(t, path, "rev-parse", namespace+base); got != different {
+					t.Fatalf("refusal changed replacement ref: %s != %s", got, different)
+				}
+				if strings.HasPrefix(replacement, "late-") && calls != 2 {
+					t.Fatalf("replacement missed final preflight: scans=%d", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestAcquire_ForeignReclamationAuthenticatesIgnoredPaths(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		for _, risk := range []string{"empty", "late-empty", "seeded", "beside", "prefix", "nested", "late-extra"} {
+			t.Run(fmt.Sprintf("leased=%t/%s", leased, risk), func(t *testing.T) {
+				foreign, caller, poolDir := setupSharedClonePool(t)
+				if err := os.WriteFile(filepath.Join(foreign, ".gitignore"), []byte(".env.local\nlocal/\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				seeded := risk != "empty" && risk != "late-empty"
+				if seeded {
+					if err := os.WriteFile(filepath.Join(foreign, ".worktreeinclude"), []byte("local/config.env\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(filepath.Join(foreign, "local"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(foreign, "local", "config.env"), []byte("authenticated seed\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					runGit(t, foreign, "add", ".worktreeinclude")
+				}
+				runGit(t, foreign, "add", ".gitignore")
+				runGit(t, foreign, "commit", "-m", "ignored local configuration")
+				runGit(t, foreign, "push", "origin", "main")
+				path, err := Acquire(foreign, poolDir, 1, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				clearOwnerReservation(t, poolDir, path)
+				before, err := ReadState(poolDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantInventory := []string(nil)
+				if seeded {
+					wantInventory = []string{"local/config.env"}
+					assertFileContents(t, filepath.Join(path, "local", "config.env"), "authenticated seed\n")
+				}
+				if !before.Worktrees[0].SeedInventoryKnown || !reflect.DeepEqual(before.Worktrees[0].SeededPaths, wantInventory) {
+					t.Fatalf("fixture inventory is not authenticated and exact: %#v", before.Worktrees[0])
+				}
+				extra := ".env.local"
+				switch risk {
+				case "beside", "late-extra":
+					extra = "local/private.env"
+				case "prefix":
+					extra = "local/config.env.extra"
+				case "nested":
+					if err := os.Remove(filepath.Join(path, "local", "config.env")); err != nil {
+						t.Fatal(err)
+					}
+					extra = "local/config.env/private.env"
+				}
+				writeExtra := func() {
+					t.Helper()
+					full := filepath.Join(path, filepath.FromSlash(extra))
+					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(full, []byte("unique ignored work\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				calls := 0
+				if strings.HasPrefix(risk, "late-") {
+					oldScan := findProcessesInWorktree
+					findProcessesInWorktree = func(candidate string) ([]process.ProcessInfo, error) {
+						if candidate != path {
+							return oldScan(candidate)
+						}
+						calls++
+						if calls == 2 {
+							writeExtra()
+						}
+						return nil, nil
+					}
+					t.Cleanup(func() { findProcessesInWorktree = oldScan })
+				} else if risk != "seeded" {
+					writeExtra()
+				}
+				if status := gitOut(t, path, "status", "--porcelain", "--untracked-files=all"); status != "" {
+					t.Fatalf("ignored fixture must appear clean: %s", status)
+				}
+				got, err := acquireReclamationCaller(caller, poolDir, 1, leased, true)
+				if risk == "seeded" {
+					if err != nil {
+						t.Fatalf("authenticated ignored seed blocked reclaim: %v", err)
+					}
+					assertCloneCommonDir(t, got, caller)
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Fatalf("seeded foreign slot was not reclaimed: %v", err)
+					}
+					after, err := ReadState(poolDir)
+					if err != nil || len(after.Worktrees) != 1 || after.Worktrees[0].Path != got {
+						t.Fatalf("seeded reclaim did not replace foreign state: %#v (%v)", after, err)
+					}
+					return
+				}
+				if err == nil || got != "" {
+					t.Fatalf("reclaimed unseeded ignored data: path=%q err=%v", got, err)
+				}
+				after, err := ReadState(poolDir)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("refusal changed pool state: %#v -> %#v (%v)", before, after, err)
+				}
+				assertCloneCommonDir(t, path, foreign)
+				assertFileContents(t, filepath.Join(path, filepath.FromSlash(extra)), "unique ignored work\n")
+				if seeded && risk != "nested" {
+					assertFileContents(t, filepath.Join(path, "local", "config.env"), "authenticated seed\n")
+				}
+				if strings.HasPrefix(risk, "late-") && calls != 2 {
+					t.Fatalf("ignored writer missed final preflight: scans=%d", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestAcquire_ForeignReclamationSkipsUnseededIgnoredSlot(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased=%t", leased), func(t *testing.T) {
+			foreign, caller, poolDir := setupSharedClonePool(t)
+			if err := os.WriteFile(filepath.Join(foreign, ".gitignore"), []byte(".env.local\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, foreign, "add", ".gitignore")
+			runGit(t, foreign, "commit", "-m", "ignore local configuration")
+			runGit(t, foreign, "push", "origin", "main")
+			paths := idleSlots(t, foreign, poolDir, 2)
+			first, second := paths[0], paths[1]
+			if err := os.WriteFile(filepath.Join(first, ".env.local"), []byte("unique ignored work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			before, err := ReadState(poolDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := acquireReclamationCaller(caller, poolDir, 2, leased, true)
+			if err != nil {
+				t.Fatalf("ignored-data refusal blocked disposable sibling: %v", err)
+			}
+			assertCloneCommonDir(t, got, caller)
+			assertCloneCommonDir(t, first, foreign)
+			assertFileContents(t, filepath.Join(first, ".env.local"), "unique ignored work\n")
+			if _, err := os.Stat(second); !os.IsNotExist(err) {
+				t.Fatalf("second foreign slot was not reclaimed: %v", err)
+			}
+			after, err := ReadState(poolDir)
+			if err != nil || len(after.Worktrees) != 2 || !reflect.DeepEqual(before.Worktrees[0], after.Worktrees[0]) || after.Worktrees[1].Path != got {
+				t.Fatalf("reclamation changed protected state instead of replacing sibling: %#v (%v)", after, err)
+			}
+		})
+	}
+}
+
 func TestAcquire_ForeignReclamationSkipsGitRemovalRefusals(t *testing.T) {
 	for _, leased := range []bool{false, true} {
 		for _, risk := range []string{"locked", "initialized-submodule", "retained-modules", "late-lock", "late-init"} {

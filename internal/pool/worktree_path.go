@@ -303,12 +303,10 @@ func canonicalPathPrefix(path string) (string, error) {
 // pathContains reports whether parent is child itself or holds it somewhere
 // below.
 //
-// Spelling decides it only where identity cannot. filepath.Rel compares bytes
-// and EvalSymlinks keeps the case it was given, so on a case-insensitive
-// filesystem (APFS and NTFS by default) a differently-cased prefix reads as a
-// different directory: a literal '<repo_parent>/MyRepo/trees/{slot}' would land
-// inside the repository this comparison exists to keep worktrees out of. Every
-// existing ancestor of child is therefore also compared with parent by identity.
+// Spelling decides it only where identity cannot. filepath.Rel compares bytes,
+// so a lexical mismatch alone cannot prove that differently-cased paths name
+// distinct directories. Every existing ancestor of child is therefore also
+// compared with parent by identity to keep aliases from bypassing placement.
 func pathContains(parent, child string) bool {
 	if pathContainsLexically(parent, child) {
 		return true

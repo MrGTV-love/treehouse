@@ -307,7 +307,7 @@ func TestReadWriteState_UnprovenAliasRecordsFailClosed(t *testing.T) {
 }
 
 func TestReadWriteState_RegistrationDoesNotResolveConflictingRecords(t *testing.T) {
-	for _, mode := range []string{"lease", "seed", "same-path", "unmatched-backlink", "foreign-backlink", "quarantine", "registered-unknown", "registered-unknown-live-alias", "registered-unknown-seeded-alias"} {
+	for _, mode := range []string{"lease", "seed", "unmatched-backlink", "foreign-backlink", "quarantine", "registered-unknown", "registered-unknown-live-alias", "registered-unknown-seeded-alias"} {
 		for _, reverse := range []bool{false, true} {
 			t.Run(mode+"/"+map[bool]string{false: "disk-first", true: "alias-first"}[reverse], func(t *testing.T) {
 				poolDir, diskPath, aliasPath, backlinkPath := registeredAliasFixture(t)
@@ -322,9 +322,6 @@ func TestReadWriteState_RegistrationDoesNotResolveConflictingRecords(t *testing.
 				case "seed":
 					a.SeededPaths, b.SeededPaths = []string{"cache"}, []string{"cache"}
 					a.SeedBackend, b.SeedBackend = "git", "git"
-				case "same-path":
-					b.Path = a.Path
-					b.CreatedAt = time.Unix(10, 0).UTC()
 				case "unmatched-backlink":
 					thirdAlias := filepath.Join(filepath.Dir(poolDir), "third-alias")
 					if err := os.Symlink(poolDir, thirdAlias); err != nil {
@@ -358,18 +355,6 @@ func TestReadWriteState_RegistrationDoesNotResolveConflictingRecords(t *testing.
 				assertAliasConflictPreserved(t, poolDir, a, b)
 			})
 		}
-	}
-}
-
-func TestReadState_IdenticalRecordsDeduplicate(t *testing.T) {
-	poolDir := t.TempDir()
-	path := makeFakeWorktree(t, poolDir, "1", "repo")
-	entry := WorktreeEntry{Name: "1", Path: path, CreatedAt: time.Unix(1000, 0).UTC(), Leased: true, LeaseID: "lease", SeedInventoryKnown: true}
-	entries := []WorktreeEntry{entry, entry}
-	writeAliasFixture(t, poolDir, entries...)
-	got, err := ReadState(poolDir)
-	if err != nil || len(got.Worktrees) != 1 || !reflect.DeepEqual(got.Worktrees[0], entries[0]) {
-		t.Fatalf("identical records did not deduplicate: %#v (%v)", got.Worktrees, err)
 	}
 }
 

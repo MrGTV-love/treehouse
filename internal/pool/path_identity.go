@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 
 	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 	"github.com/kunchenguid/treehouse/v3/internal/vcs"
@@ -76,15 +75,6 @@ func normalizeStatePaths(s State) (State, statePathIndex, error) {
 func mergeAliasEntries(a, b WorktreeEntry) (WorktreeEntry, bool) {
 	if a.Name != b.Name {
 		return WorktreeEntry{}, false
-	}
-	if a.Path == b.Path && a.CreatedAt == b.CreatedAt && a.Destroying == b.Destroying &&
-		a.OwnerPID == b.OwnerPID && a.OwnerStartedAt == b.OwnerStartedAt &&
-		a.Leased == b.Leased && a.LeaseID == b.LeaseID && a.LeaseHolder == b.LeaseHolder && a.LeasedAt == b.LeasedAt &&
-		a.BaseBranch == b.BaseBranch && a.SeedInventoryKnown == b.SeedInventoryKnown &&
-		a.SeedInventoryDigest == b.SeedInventoryDigest && (a.SeededPaths == nil) == (b.SeededPaths == nil) &&
-		slices.Equal(a.SeededPaths, b.SeededPaths) && a.SeedBackend == b.SeedBackend && a.SeedAuthIdentity == b.SeedAuthIdentity &&
-		a.RecoveryError == b.RecoveryError && a.RecoveryReason == b.RecoveryReason {
-		return a, true
 	}
 	// A reconstructed alias (including one an older binary auto-freed) has
 	// no ownership, requested base or seeded files to contribute. It must not

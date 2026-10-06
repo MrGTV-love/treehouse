@@ -699,6 +699,22 @@ func RemoveCleanWorktree(repoRoot, path string) error {
 // ErrWorktreeNotDisposable identifies a refusal before any deletion is attempted.
 var ErrWorktreeNotDisposable = errors.New("worktree is not provably disposable")
 
+// requireNoWorktreeOperation inspects the linked worktree's own Git directory,
+// not the shared common directory. A clean index does not imply an idle Git
+// operation: paused merges and rebases can have no file changes at all.
+func requireNoWorktreeOperation(gitDir string) error {
+	for _, marker := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer", "BISECT_START"} {
+		_, err := os.Lstat(filepath.Join(gitDir, marker))
+		if err == nil {
+			return fmt.Errorf("worktree has a Git operation in progress (%s)", marker)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot verify worktree operation state (%s): %w", marker, err)
+		}
+	}
+	return nil
+}
+
 // RemoveLandedWorktree holds Git's HEAD lock through verification and clean
 // removal. Unlike prune's base-branch check, only live remote refs may protect
 // these commits: a branch in the clone being reclaimed is not a remote backup.
@@ -736,6 +752,10 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() err
 		return err
 	}
 	defer os.Remove(lockPath)
+	gitDir := filepath.Dir(headPath)
+	if err := requireNoWorktreeOperation(gitDir); err != nil {
+		return err
+	}
 	head, err := worktreeHead(worktreePath)
 	if err != nil {
 		return err
@@ -760,6 +780,9 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, beforeRemove func() err
 	untracked, reason = RecoveryWorktree(worktreePath)
 	if reason != "" || len(untracked) != 0 {
 		return fmt.Errorf("worktree became dirty during removal verification: %s", reason)
+	}
+	if err := requireNoWorktreeOperation(gitDir); err != nil {
+		return err
 	}
 	current, err := openRootUnchanged(worktreePath, identity)
 	if err != nil {

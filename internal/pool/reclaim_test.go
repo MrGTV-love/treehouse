@@ -13,6 +13,69 @@ import (
 	"github.com/kunchenguid/treehouse/v3/internal/process"
 )
 
+func TestAcquire_ForeignReclamationPreservesPausedOperation(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		for _, operation := range []string{"merge", "rebase"} {
+			t.Run(fmt.Sprintf("leased=%t/%s", leased, operation), func(t *testing.T) {
+				foreign, caller, poolDir := setupSharedClonePool(t)
+				path, err := Acquire(foreign, poolDir, 1, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := Release(poolDir, path); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, path, "checkout", "-b", "operation-target")
+				runGit(t, path, "commit", "--allow-empty", "-m", "remotely backed empty commit")
+				runGit(t, path, "push", "origin", "operation-target")
+				if operation == "merge" {
+					runGit(t, path, "checkout", "--detach", "HEAD^")
+					runGit(t, path, "merge", "--no-commit", "--no-ff", "operation-target")
+				} else {
+					cmd := exec.Command("git", "rev-parse", "HEAD")
+					cmd.Dir = path
+					head, err := cmd.Output()
+					if err != nil {
+						t.Fatal(err)
+					}
+					cmd = exec.Command("git", "rebase", "--interactive", "--keep-empty", "HEAD^")
+					cmd.Dir = path
+					// Git runs the sequence editor through its shell on every
+					// platform and appends the todo filename after this redirect.
+					cmd.Env = append(os.Environ(), "GIT_SEQUENCE_EDITOR=echo edit "+strings.TrimSpace(string(head))+" >")
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("pause rebase: %v\n%s", err, out)
+					}
+				}
+				cmd := exec.Command("git", "status", "--porcelain", "--untracked-files=all")
+				cmd.Dir = path
+				if out, err := cmd.Output(); err != nil || len(out) != 0 {
+					t.Fatalf("paused operation must have a clean index and checkout: %q (%v)", out, err)
+				}
+				before, err := ReadState(poolDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if leased {
+					_, err = AcquireLeaseInfoWithOptions(caller, poolDir, 1, nil, "caller", AcquireOptions{SkipFetch: true})
+				} else {
+					_, err = AcquireWithOptions(caller, poolDir, 1, nil, AcquireOptions{SkipFetch: true})
+				}
+				if err == nil {
+					t.Fatal("reclaimed a clean foreign checkout with an operation in progress")
+				}
+				after, err := ReadState(poolDir)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("refusal changed pool state: %#v -> %#v (%v)", before, after, err)
+				}
+				// The real consumer must still recognize the operation, not
+				// merely find that the checkout's files happen to survive.
+				runGit(t, path, operation, "--abort")
+			})
+		}
+	}
+}
+
 func TestAcquire_ForeignReclamationRefusesUnsafeSlots(t *testing.T) {
 	for _, leased := range []bool{false, true} {
 		for _, risk := range []string{"dirty", "untracked", "hidden-edits", "local-only-commits", "leased", "owner", "process", "late-process", "late-hidden-edits", "process-scan-failure", "head-locked", "stale-remote-ref", "unreachable-remote", "damaged"} {

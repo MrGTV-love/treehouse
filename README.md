@@ -530,8 +530,10 @@ requesting clone's slots. If none is safe to reuse, it creates one when the
 pool's total is below the calling clone's effective `max_trees`. At exactly the
 cap, it first attempts to remove one provably disposable foreign Git slot and
 then creates a fresh caller-owned slot, keeping the total unchanged. In-use,
-leased, dirty, damaged and unlanded slots are never candidates; a failed
-process, ownership or remote-landing check means leave the slot alone. A local
+leased, dirty, damaged and unlanded slots are never candidates, nor are slots
+with a merge, rebase, cherry-pick, revert, bisect or sequenced Git operation in
+progress, even if the index and checkout are clean. A failed process, ownership,
+operation-state or remote-landing check means leave the slot alone. A local
 base branch or stale remote-tracking ref is not sufficient deletion evidence.
 If no foreign slot qualifies, or the pool is already above the effective cap,
 acquisition fails. Reuse of a safe own-clone slot still works at the cap.

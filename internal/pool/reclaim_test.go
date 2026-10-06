@@ -243,9 +243,7 @@ func TestAcquire_ForeignReclamationAcceptsRemoteFeatureBranch(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("remotely backed foreign slot was not removed: %v", err)
 	}
-	if content, err := os.ReadFile(filepath.Join(got, "README.md")); err != nil || string(content) != "hi\n" {
-		t.Fatalf("caller did not get a fresh checkout of its base: %q (%v)", content, err)
-	}
+	assertFileContents(t, filepath.Join(got, "README.md"), "hi\n")
 }
 
 func TestAcquire_ForeignReclamationSkipsHeldSlotAndKeepsSiblingData(t *testing.T) {

@@ -11,6 +11,10 @@ make build
 make test
 ```
 
+`make test` and the Linux/macOS/Windows CI matrix run `go test -timeout 20m ./...`.
+The explicit per-package timeout accommodates real Git integration fixtures on
+Windows, where the full suite can exceed Go's default 10-minute limit.
+
 ## Making Changes
 
 1. Fork the repo and create a branch from `main`.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -21,6 +22,16 @@ func TestCaseAliasPoolLifecycle(t *testing.T) {
 	aliasInfo, err := os.Stat(aliasRepo)
 	if err != nil || !os.SameFile(info, aliasInfo) {
 		t.Skip("requires a case-insensitive filesystem")
+	}
+	if runtime.GOOS != "windows" {
+		ancestor := filepath.Dir(repoDir)
+		if err := os.Chmod(ancestor, 0111); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(ancestor, 0700) })
+		if _, err := os.ReadDir(ancestor); !os.IsPermission(err) {
+			t.Skipf("search-only ancestor requires enforced directory permissions: %v", err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(repoDir, "treehouse.toml"), []byte("max_trees = 2\n"), 0644); err != nil {
 		t.Fatal(err)

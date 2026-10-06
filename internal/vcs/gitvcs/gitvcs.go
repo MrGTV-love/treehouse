@@ -1387,6 +1387,42 @@ func authenticateLinkedWorktree(root *os.Root, worktreePath string) error {
 	return nil
 }
 
+func RegisteredWorktreePath(worktreePath string) (string, error) {
+	root, err := os.OpenRoot(worktreePath)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	marker, err := root.Lstat(".git")
+	if err != nil || !marker.Mode().IsRegular() {
+		return "", fmt.Errorf("unregistered worktree %s", worktreePath)
+	}
+	contents, err := root.ReadFile(".git")
+	if err != nil {
+		return "", err
+	}
+	gitDir, ok := strings.CutPrefix(strings.TrimSuffix(string(contents), "\n"), "gitdir: ")
+	if !ok || gitDir == "" {
+		return "", fmt.Errorf("unregistered worktree %s", worktreePath)
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(worktreePath, gitDir)
+	}
+	backlink, err := os.ReadFile(filepath.Join(gitDir, "gitdir"))
+	if err != nil {
+		return "", err
+	}
+	registeredMarker := strings.TrimSuffix(string(backlink), "\n")
+	if !filepath.IsAbs(registeredMarker) || filepath.Base(registeredMarker) != ".git" {
+		return "", fmt.Errorf("unregistered worktree %s", worktreePath)
+	}
+	backlinkInfo, err := os.Stat(registeredMarker)
+	if err != nil || !os.SameFile(marker, backlinkInfo) {
+		return "", fmt.Errorf("unregistered worktree %s", worktreePath)
+	}
+	return filepath.Dir(registeredMarker), nil
+}
+
 func DetachWorktree(worktreePath string) error {
 	_, err := runGit(worktreePath, "checkout", "--detach")
 	return err

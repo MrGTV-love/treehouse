@@ -423,7 +423,7 @@ func makeFakeWorktree(t *testing.T, poolDir, slot, repoName string) string {
 	if err := os.WriteFile(filepath.Join(wtPath, ".git"), []byte("gitdir: ../../fake.git\n"), 0644); err != nil {
 		t.Fatalf("WriteFile .git: %v", err)
 	}
-	return wtPath
+	return canonicalDir(t, wtPath)
 }
 
 func makeFakeJJWorktree(t *testing.T, poolDir, slot, repoName string) string {
@@ -432,5 +432,5 @@ func makeFakeJJWorktree(t *testing.T, poolDir, slot, repoName string) string {
 	if err := os.MkdirAll(filepath.Join(wtPath, ".jj"), 0755); err != nil {
 		t.Fatalf("MkdirAll .jj: %v", err)
 	}
-	return wtPath
+	return canonicalDir(t, wtPath)
 }

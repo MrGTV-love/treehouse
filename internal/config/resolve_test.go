@@ -53,11 +53,7 @@ func TestResolvePoolDir_AbsoluteRoot(t *testing.T) {
 		t.Fatalf("ResolvePoolDir failed: %v", err)
 	}
 
-	repoName := filepath.Base(repoDir)
-	expected := filepath.Join(absRoot, ".treehouse", repoName)
-	if !strings.HasPrefix(poolDir, expected) {
-		t.Errorf("expected pool dir to start with %s, got %s", expected, poolDir)
-	}
+	assertPoolRootIdentity(t, poolDir, absRoot)
 }
 
 func TestResolvePoolDir_DotSlashRoot(t *testing.T) {
@@ -86,11 +82,7 @@ func TestResolvePoolDir_EnvVarExpansion(t *testing.T) {
 		t.Fatalf("ResolvePoolDir failed: %v", err)
 	}
 
-	repoName := filepath.Base(repoDir)
-	expected := filepath.Join(absRoot, ".treehouse", repoName)
-	if !strings.HasPrefix(poolDir, expected) {
-		t.Errorf("expected pool dir to start with %s, got %s", expected, poolDir)
-	}
+	assertPoolRootIdentity(t, poolDir, absRoot)
 }
 
 func TestResolvePoolRoot_EmptyRoot(t *testing.T) {
@@ -181,5 +173,22 @@ func TestResolveRoot_FlagDotSelectsInProject(t *testing.T) {
 	expected := filepath.Join(repoDir, ".treehouse", repoName)
 	if !strings.HasPrefix(poolDir, expected) {
 		t.Errorf("expected in-project pool dir under %s, got %s", expected, poolDir)
+	}
+}
+
+// Resolution may change spelling (/tmp vs /private/tmp, symlinks or case),
+// but creating the returned pool must still land under the requested root.
+func assertPoolRootIdentity(t *testing.T, poolDir, root string) {
+	t.Helper()
+	if err := os.MkdirAll(poolDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Stat(filepath.Dir(filepath.Dir(poolDir)))
+	if err != nil || !os.SameFile(want, got) {
+		t.Fatalf("pool %s was placed outside root %s: %v", poolDir, root, err)
 	}
 }

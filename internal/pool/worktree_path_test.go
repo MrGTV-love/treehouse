@@ -449,12 +449,9 @@ func TestResolveWorktreePath_SymlinksDoNotBypassPlacement(t *testing.T) {
 	}
 }
 
-// TestResolveWorktreePath_InPoolPathMustBeSpelledThroughThePool covers the gap
-// between the two spellings a placement has: the checks canonicalize, but state
-// records the requested path. A symlink that reaches the pool from outside it
-// satisfies every canonical rule, so without a lexical requirement the worktree
-// is recorded under the link while recovery finds the same directory under the
-// pool and registers it a second time.
+// TestResolveWorktreePath_InPoolPathMustBeSpelledThroughThePool covers the
+// creation-time spelling restriction; see checkWorktreePlacement for why
+// path-bound metadata still requires it despite physical-identity recovery.
 func TestResolveWorktreePath_InPoolPathMustBeSpelledThroughThePool(t *testing.T) {
 	base := t.TempDir()
 	base, err := filepath.EvalSymlinks(base)

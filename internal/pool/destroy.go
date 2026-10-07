@@ -158,7 +158,7 @@ func DestroyWorktree(poolDir, worktreePath string, opts DestroyOptions) (Destroy
 			return err
 		}
 		for i := range state.Worktrees {
-			if state.Worktrees[i].Path == worktreePath {
+			if samePath(state.Worktrees[i].Path, worktreePath) {
 				entry := state.Worktrees[i]
 				target = &entry
 				break
@@ -462,7 +462,7 @@ func executeDestroy(poolDir string, removable []DestroyTarget, resolveContext pr
 		for _, reservation := range reserved {
 			idx := -1
 			for i := range state.Worktrees {
-				if state.Worktrees[i].Path == reservation.worktree.Path {
+				if samePath(state.Worktrees[i].Path, reservation.worktree.Path) {
 					idx = i
 					break
 				}
@@ -563,12 +563,10 @@ func restoreOriginalOwnerReservation(wt *WorktreeEntry, reservation destroyReser
 	wt.OwnerStartedAt = reservation.originalOwnerStartedAt
 }
 
-// removeManagedWorktree deletes a worktree's git registration (when its backing
-// repository is still present) and the directory removableWorktreeContainer
-// selects: its numbered slot directory inside the pool, or just the worktree
-// when worktree_path placed it elsewhere. git removal uses --force because
-// destroy deliberately removes dirty, unmerged, or unverified worktrees once the
-// caller has opted in.
+// removeManagedWorktree deletes a worktree's VCS registration (when its backing
+// repository is still present) and only its own directory, then removes an empty
+// pool-owned parent. VCS removal uses --force because destroy deliberately
+// removes dirty, unmerged, or unverified worktrees once the caller has opted in.
 func removeManagedWorktree(poolDir string, wt WorktreeEntry) error {
 	path := wt.Path
 	orphaned, _ := backingRepositoryMissing(path)
@@ -593,11 +591,7 @@ func removeManagedWorktree(poolDir string, wt WorktreeEntry) error {
 			return fmt.Errorf("VCS refused to remove worktree: %w", err)
 		}
 	}
-	container, err := removableWorktreeContainer(poolDir, path)
-	if err != nil {
-		return fmt.Errorf("refusing unsafe cleanup path: %w", err)
-	}
-	if err := os.RemoveAll(container); err != nil {
+	if err := removeWorktreeDirectory(poolDir, path); err != nil {
 		return fmt.Errorf("could not remove worktree directory: %w", err)
 	}
 	if orphaned || markerless {
@@ -620,11 +614,11 @@ func resolvePoolRepoRoot(wt WorktreeEntry) (string, error) {
 }
 
 func measureDestroySize(poolDir string, target *DestroyTarget) {
-	container, err := removableWorktreeContainer(poolDir, target.Path)
+	_, err := removableWorktreeContainer(poolDir, target.Path)
 	if err != nil {
 		return
 	}
-	if bytes, err := dirSize(container); err == nil {
+	if bytes, err := dirSize(target.Path); err == nil {
 		target.Bytes = bytes
 	}
 }

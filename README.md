@@ -403,6 +403,10 @@ Commands also restore an on-disk worktree that is missing from an otherwise vali
 Every restored entry is marked `leased` because treehouse cannot know whether it was idle, in-use, or durably leased.
 Both routes scan the pool directory, so a worktree that `worktree_path` placed outside it is not rebuilt — see [Worktree path](#worktree-path) for how to remove one.
 
+Existing directories are matched by filesystem identity, including symlinks and case variants on case-insensitive filesystems such as default APFS and NTFS. They count as one slot, and `return`/`destroy` accept alias paths without bypassing lease, live-process or work-safety checks. Existing pools are not moved or renamed; genuinely distinct directories on a case-sensitive filesystem remain distinct. Legacy recovered aliases are consolidated only when the authoritative record can be identified; ambiguous or conflicting records leave the state file and worktrees intact for inspection. See the [pool/slot identity invariant](docs/design.md#pool-and-lifecycle-invariants) for the authority and registration rules.
+
+The recovered lease holder text alone does not prove JSON corruption: missing-entry recovery and inventory-authentication failures use the same holder. A JSON parse failure also prints an explicit corrupt/truncated-state warning.
+
 Run `treehouse status` to inspect recovered entries.
 State from 3.0 or later whose pool-local `treehouse-state.key` is missing, or whose seed inventory fails to verify, is handled the same way, and so is any state beside an invalid key.
 State from a release before 3.0 is the exception: it never seeded ignored files, so treehouse adopts it as is.
@@ -522,6 +526,8 @@ max_trees = 16
 The repo-level config takes precedence for repo-safe settings.
 `treehouse prune --all` can run without a repository, so it uses only the user-level config and does not read per-repo `treehouse.toml` files while sweeping.
 If no config is found, the default pool size is 16.
+
+Pool names use the filesystem-resolved repository directory name and a short hash of the origin URL (or the resolved repository path when no remote is available).
 
 `max_trees` remains a **shared-pool cap**, not a per-clone allowance. Same-named
 clones with the same origin URL and pool root share that budget; all registered
@@ -662,9 +668,9 @@ export TREEHOUSE_WORKTREE_PATH='{repo_parent}/{repo}-{slot}'
 | Placeholder | Expands to |
 |---|---|
 | `{slot}` | The slot name (`1`, `2`, …). **Required** — without it every slot resolves to one directory. |
-| `{repo}` | The repository directory's name |
-| `{repo_parent}` | The directory holding the repository |
-| `{pool}` | This repository's pool directory |
+| `{repo}` | The filesystem-resolved repository directory's name |
+| `{repo_parent}` | The parent of the filesystem-resolved repository root |
+| `{pool}` | This repository's resolved pool directory |
 
 One of `{pool}` or `{repo}` is also required, because slot names are allocated per pool: a user-level `$HOME/trees/{slot}` would send the first slot of *every* repository to `$HOME/trees/1`. `{repo_parent}` does not count — two repositories side by side expand it to the same directory, so `{repo_parent}/{slot}` collides exactly the same way. It stays available as a placeholder; it just has to be paired, as in `{repo_parent}/{repo}-{slot}`.
 The template must resolve to an absolute path, so anchor it on `{pool}`, `{repo_parent}`, or an absolute prefix of your own: a bare `{repo}-{slot}` is rejected rather than resolved against whichever directory you happened to run `get` from.
@@ -678,9 +684,9 @@ A few things worth knowing:
 - **It is off by default.** With nothing set, the layout is unchanged.
 - **It supersedes [`unique_leaf`](#unique-worktree-directory-names).** A template names every segment of the path, including the leaf, so there is nothing left for `unique_leaf` to rename; write `{repo}-{slot}` in the template for the same effect. Setting both warns once on stderr rather than silently picking one.
 - **It applies only to slots created from now on.** Worktrees already in the pool keep the path recorded in state — nothing is moved, renamed, or invalidated — so both layouts coexist in a pool until the old slots are destroyed and re-acquired. Recycling, leases, `status`, `return`, `prune`, and `destroy` all key off the recorded path, so they behave the same wherever a slot lives.
-- **A template that would corrupt the pool is rejected before anything is created**: a missing `{slot}` or repository-scoping placeholder, a misspelled placeholder, a template that resolves to the same directory for every slot (path cleaning cancels `..` against the segment before it, so `{slot}/../shared` would send every slot to one directory; a `..` that only walks up inside a variable's value is fine), a path that is or contains the repository or the pool directory, and a path inside the repository working tree (where the worktree would show up as untracked content). Inside the pool directory a template must stay at `{pool}/{slot}/<name>`, because that is the depth pool-state recovery scans, and it must be spelled through the pool directory itself rather than through a symlink into it, so pool state and recovery name that worktree the same way. A path inside *another* repository's pool directory is rejected too: that pool's recovery would register the worktree as a slot of its own, which consumes one of its slots for good and leaves the owning repository unable to return it. A worktree beside the pools, under the Treehouse root, is fine — the root holds pools without being one. Placement is judged on canonicalized paths, so a symlink pointing back into the repository or the pool is caught rather than followed. Every one of these checks runs on every `get`, including the acquisitions that recycle a slot and so never use the template, so what a template is rejected for never depends on how full the pool is.
+- **A template that would corrupt the pool is rejected before anything is created**: a missing `{slot}` or repository-scoping placeholder, a misspelled placeholder, a template that resolves to the same directory for every slot (path cleaning cancels `..` against the segment before it, so `{slot}/../shared` would send every slot to one directory; a `..` that only walks up inside a variable's value is fine), a path that is or contains the repository or the pool directory, and a path inside the repository working tree (where the worktree would show up as untracked content). Inside the pool directory a template must stay at `{pool}/{slot}/<name>`, because that is the depth pool-state recovery scans, and it must be spelled through the pool directory itself rather than through a symlink into it. Use `{pool}` to create new slots through the pool's resolved path. A path inside *another* repository's pool directory is rejected too: that pool's recovery would register the worktree as a slot of its own, which consumes one of its slots for good and leaves the owning repository unable to return it. A worktree beside the pools, under the Treehouse root, is fine — the root holds pools without being one. Placement is judged on canonicalized paths, so a symlink pointing back into the repository or the pool is caught rather than followed. Every one of these checks runs on every `get`, including the acquisitions that recycle a slot and so never use the template, so what a template is rejected for never depends on how full the pool is.
 - **An existing directory is never adopted, and never wedges the pool.** `{repo}` alone still collides between two repositories that share a directory name, and no template can rule every collision out, so a templated path that already exists is never quietly turned into a second pool's worktree. `get` warns on stderr, skips that slot name and tries the next one instead, up to `max_trees` candidates, so a stray directory — which is what a lost state file leaves behind, since recovery only scans the pool directory — costs a slot name rather than every acquisition. Only when every candidate path is occupied does `get` fail; it names them, says treehouse never adopts an existing directory, and points at `git worktree list` and [Recovering missing pool state](#recovering-missing-pool-state) so you can decide what the occupants are, rather than prescribing a command whose preconditions it cannot check. The built-in layout is untouched by this check.
-- **Only the worktree is deleted.** Under the built-in layout `prune` and `destroy` also remove the numbered slot directory, which exists solely to hold the worktree. A worktree placed elsewhere has a parent Treehouse does not own, so its parent is left alone.
+- **Only the worktree is deleted.** `prune` and `destroy` also remove its pool-owned slot directory when empty, never sibling worktrees or files beside the target. A worktree placed elsewhere has a parent Treehouse does not own, so its parent is left alone.
 - **Recovering a lost state file is pool-local.** `ReadState` reconstructs missing entries by scanning the pool directory, so worktrees placed outside it cannot be recovered that way; the pool keeps working — later `get`s skip the names those worktrees occupy — but remove such a worktree with `git worktree remove` (or `jj workspace forget`) to get its slot name back.
 - **Under the jj backend, seeding leaves an empty directory behind.** With a `.worktreeinclude` manifest, a worktree placed outside the pool leaves an empty hidden `.treehouse-jj-seed-auth` directory in the parent the template chose. Its entries are removed with the worktree; the directory itself stays, because removing it safely would need a lock across every pool that shares that parent.
 
@@ -721,7 +727,7 @@ The worktree root can also be set without a config file, and the resolved value 
 4. `root` in the user-level `~/.config/treehouse/config.toml`
 5. The default, `~/.treehouse`
 
-A relative value (including `.`) is resolved from the repo root, exactly like a relative `root` in config; `treehouse` is always appended, so `--root .` places the pool at `<repo>/.treehouse/`.
+A relative value (including `.`) is resolved from the repo root, exactly like a relative `root` in config; `.treehouse` is always appended, so `--root .` places the pool at `<repo>/.treehouse/`. Root resolution follows symlinks and uses the filesystem spelling of the deepest existing prefix, retaining the requested spelling of components not yet created.
 
 ### In-project storage
 

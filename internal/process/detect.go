@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 	"github.com/shirou/gopsutil/v4/process"
 )
 
@@ -40,7 +41,7 @@ func StartedAt(pid int32) (int64, bool) {
 }
 
 // FindProcessesInWorktree returns processes whose current directory is the
-// worktree root or a descendant after absolute path and symlink resolution.
+// worktree root or a descendant after filesystem spelling and symlink resolution.
 func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 	procs, err := process.Processes()
 	if err != nil {
@@ -51,7 +52,7 @@ func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	absWorktree = resolvePath(absWorktree)
+	absWorktree = filesystemPath(absWorktree)
 
 	var result []ProcessInfo
 
@@ -74,22 +75,18 @@ func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 }
 
 // WorktreeContainsCwd reports whether a working directory is the worktree root
-// or a descendant of it, applying the same absolute-path and symlink
-// resolution to both sides that the process scan applies to every process cwd.
-// It is the one definition of that containment test: a caller comparing its own
-// cwd against a stored worktree path has to resolve symlinks for the same
-// reason the scan does, or a pool reached through a symlinked root never
-// matches.
+// or a descendant of it. Both spellings are resolved using the filesystem, so
+// a case alias or symlink does not hide a process or the caller's own cwd.
 func WorktreeContainsCwd(worktreePath, cwd string) bool {
 	absWorktree, err := filepath.Abs(worktreePath)
 	if err != nil {
 		return false
 	}
-	return cwdWithinWorktree(resolvePath(absWorktree), cwd)
+	return cwdWithinWorktree(filesystemPath(absWorktree), filesystemPath(cwd))
 }
 
 // cwdWithinWorktree reports whether a process working directory falls inside the
-// worktree root, which must already be absolute and symlink-resolved. An empty
+// worktree root, which must already be absolute and filesystem-resolved. An empty
 // cwd never matches: gopsutil returns "" (with no error) for processes whose
 // working directory cannot be read - notably Windows system processes such as
 // System and csrss.exe - and filepath.Abs("") would otherwise resolve to the
@@ -121,4 +118,17 @@ func resolvePath(p string) string {
 		return resolved
 	}
 	return p
+}
+
+// gopsutil already returns process cwds in filesystem spelling. Resolve the
+// worktree once per scan, rather than enumerating ancestor directory entries
+// again for every unrelated process on the machine.
+func filesystemPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if resolved, err := pathidentity.Existing(p); err == nil {
+		return resolved
+	}
+	return resolvePath(p)
 }

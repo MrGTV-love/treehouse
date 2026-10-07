@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+* **pool:** prevent duplicate pool records from filesystem path aliases while preserving live work (GRE-1933).
+
 ## [3.1.2](https://github.com/kunchenguid/treehouse/compare/v3.1.1...v3.1.2) (2026-10-02)
 
 

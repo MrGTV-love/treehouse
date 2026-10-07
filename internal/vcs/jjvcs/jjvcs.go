@@ -238,9 +238,9 @@ func makeRepoPointerAbsolute(wsRoot string) error {
 }
 
 // canonicalize resolves symlinks in path, falling back to the input when
-// resolution fails (for example when the path does not exist yet). Root
-// resolution must return one canonical form no matter which route produced
-// the path, because the pool identity is derived from the path string.
+// resolution fails (for example when the path does not exist yet). Both root
+// discovery routes must agree before config resolves filesystem identity for
+// pool naming; see ResolvePoolDir in internal/config.
 func canonicalize(path string) string {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {

@@ -377,6 +377,15 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	if _, err := validateWorktreePathTemplate(opts.worktreePath); err != nil {
 		return LeaseInfo{}, err
 	}
+	var err error
+	repoRoot, err = canonicalPathPrefix(repoRoot)
+	if err != nil {
+		return LeaseInfo{}, err
+	}
+	poolDir, err = canonicalPathPrefix(poolDir)
+	if err != nil {
+		return LeaseInfo{}, err
+	}
 	if opts.branch != "" && vcs.BackendNameFor(repoRoot) != "git" {
 		return LeaseInfo{}, fmt.Errorf("cannot create branch %q: --branch is only supported by the git backend; remove --branch to acquire a jj workspace", opts.branch)
 	}
@@ -1035,6 +1044,9 @@ func ReleaseConditional(poolDir, worktreePath, baseBranch string, preconditions 
 		if err != nil {
 			return err
 		}
+		// Lookup accepts aliases, but VCS cleanup must use the authoritative
+		// spelling (jj workspace and seed identities are path-derived).
+		worktreePath = wt.Path
 		branch, fallback, requested := "", "", ""
 		if !markerless {
 			requested = baseBranch
@@ -1087,7 +1099,7 @@ func ReleaseConditional(poolDir, worktreePath, baseBranch string, preconditions 
 func releasableWorktree(state *State, worktreePath string, preconditions ReleasePreconditions) (*WorktreeEntry, error) {
 	for i := range state.Worktrees {
 		wt := &state.Worktrees[i]
-		if wt.Path != worktreePath {
+		if !samePath(wt.Path, worktreePath) {
 			continue
 		}
 		if wt.Destroying {
@@ -1308,7 +1320,7 @@ func FindByPath(poolDir, path string) (*WorktreeEntry, error) {
 		return nil, err
 	}
 	for _, wt := range state.Worktrees {
-		if wt.Path == path {
+		if samePath(wt.Path, path) {
 			return &wt, nil
 		}
 	}
@@ -1472,7 +1484,7 @@ func releaseEntry(wt *WorktreeEntry) {
 }
 
 func sameDestroyReservation(current, reserved WorktreeEntry) bool {
-	return current.Path == reserved.Path &&
+	return samePath(current.Path, reserved.Path) &&
 		current.Destroying &&
 		current.OwnerPID == reserved.OwnerPID &&
 		current.OwnerStartedAt == reserved.OwnerStartedAt

@@ -8,7 +8,7 @@ max_trees = 16
 
 # Optional worktree root directory.
 # Empty (default) uses the global $HOME/.treehouse store.
-# Relative paths resolve from the repo root; "treehouse" is always appended.
+# Relative paths resolve from the repo root; ".treehouse" is always appended.
 # Override per-command with the --root flag or the TREEHOUSE_ROOT env var
 # (precedence: --root > TREEHOUSE_ROOT > this file > user config > default).
 # Set to "." to keep the pool in-project at <repo>/.treehouse/, next to the
@@ -39,10 +39,9 @@ max_trees = 16
 # unique_leaf = true
 # Optional worktree path: where a NEWLY created pool slot is placed.
 # Unset (default) uses {pool}/{slot}/{repo}, unchanged from before.
-# Placeholders: {pool} (this repository's pool directory), {slot} (the slot
-# name, required), {repo} (the repository directory name), {repo_parent}
-# (the directory holding the repository). One of {pool} or {repo} is
-# required too: slot names are per pool, so a user-level template without one
+# See README.md's "Worktree path" table for placeholder meanings.
+# {slot} and one of {pool} or {repo} are required:
+# slot names are per pool, so a user-level template without one
 # sends slot 1 of every repository to one directory. {repo_parent} does not
 # count - two repositories side by side expand it identically - so pair it,
 # as in the example below.

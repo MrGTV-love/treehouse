@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 )
 
 // Placeholders a worktree path template may use. {pool} and {repo_parent}
@@ -247,12 +249,10 @@ func checkWorktreePlacement(template, resolved, repoRoot, poolDir, slot string) 
 			return fmt.Errorf("worktree path %q resolves to %q; inside the pool directory it must be %s/%s/<name> so pool state can be recovered from disk",
 				template, resolved, placeholderPool, placeholderSlot)
 		}
-		// State records the requested spelling while recovery scans the
-		// configured pool directory, so an in-pool worktree reached by another
-		// spelling (a symlink into the pool) is found twice: once as its recorded
-		// entry and once as a recovered one for the same directory.
+		// Keep the in-pool template spelling rule: metadata authored at
+		// creation (including jj registrations) binds the requested path.
 		if !pathContainsLexically(poolDir, resolved) {
-			return fmt.Errorf("worktree path %q resolves to %q, which reaches the pool directory %q by another name; spell an in-pool path through the pool directory itself (use %s) so pool state and recovery agree on one path",
+			return fmt.Errorf("worktree path %q resolves to %q, which reaches the pool directory %q by another name; spell an in-pool path through the pool directory itself (use %s)",
 				template, resolved, poolDir, placeholderPool)
 		}
 		return nil
@@ -292,42 +292,21 @@ func enclosingPoolDir(path string) string {
 }
 
 // canonicalPathPrefix resolves the deepest existing ancestor of path through
-// symlinks and re-appends the components that do not exist yet, because a path
-// treehouse is about to create can only be judged by where its existing
+// symlinks and filesystem spelling, then re-appends the missing components.
+// A path treehouse is about to create can only be judged by where its existing
 // ancestors lead. Anything other than a missing component fails closed rather
 // than falling back to the lexical path.
 func canonicalPathPrefix(path string) (string, error) {
-	current := filepath.Clean(path)
-	missing := ""
-	for {
-		resolved, err := filepath.EvalSymlinks(current)
-		if err == nil {
-			if missing == "" {
-				return resolved, nil
-			}
-			return filepath.Join(resolved, missing), nil
-		}
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", fmt.Errorf("no existing directory found above %s", path)
-		}
-		missing = filepath.Join(filepath.Base(current), missing)
-		current = parent
-	}
+	return pathidentity.Prefix(path)
 }
 
 // pathContains reports whether parent is child itself or holds it somewhere
 // below.
 //
-// Spelling decides it only where identity cannot. filepath.Rel compares bytes
-// and EvalSymlinks keeps the case it was given, so on a case-insensitive
-// filesystem (APFS and NTFS by default) a differently-cased prefix reads as a
-// different directory: a literal '<repo_parent>/MyRepo/trees/{slot}' would land
-// inside the repository this comparison exists to keep worktrees out of. Every
-// existing ancestor of child is therefore also compared with parent by identity.
+// Spelling decides it only where identity cannot. filepath.Rel compares bytes,
+// so a lexical mismatch alone cannot prove that differently-cased paths name
+// distinct directories. Every existing ancestor of child is therefore also
+// compared with parent by identity to keep aliases from bypassing placement.
 func pathContains(parent, child string) bool {
 	if pathContainsLexically(parent, child) {
 		return true

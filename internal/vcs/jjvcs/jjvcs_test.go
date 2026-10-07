@@ -676,13 +676,9 @@ func TestRemoveWorktreeRefusesMainWorkspace(t *testing.T) {
 	}
 }
 
-// TestSymlinkedRepoPathResolvesOneRootIdentity pins the symlink
-// canonicalization contract: a repository reached through a symlinked path
-// (like macOS's /tmp -> /private/tmp) must resolve to the same root string
-// from every route - `jj workspace root` in the main repo and the .jj/repo
-// pointer inside a pooled workspace - because the pool identity is derived
-// from that string. Before canonicalization the two routes disagreed and
-// treehouse status inside a workspace resolved a phantom, empty pool.
+// TestSymlinkedRepoPathResolvesOneRootIdentity checks that `jj workspace root`
+// and the pooled workspace's .jj/repo pointer agree. See canonicalize for the
+// shared root-resolution contract.
 func TestSymlinkedRepoPathResolvesOneRootIdentity(t *testing.T) {
 	requireJJ(t)
 	isolateJJConfig(t)

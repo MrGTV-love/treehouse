@@ -502,7 +502,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 		for _, reservation := range reserved {
 			idx := -1
 			for i := range state.Worktrees {
-				if state.Worktrees[i].Path == reservation.Path {
+				if samePath(state.Worktrees[i].Path, reservation.Path) {
 					idx = i
 					break
 				}
@@ -533,13 +533,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 			}
 
 			if worktree.Orphaned {
-				container, err := removableWorktreeContainer(poolDir, worktree.Path)
-				if err != nil {
-					clearReservation(&state.Worktrees[idx])
-					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "refusing unsafe cleanup path", err.Error()))
-					continue
-				}
-				if err := os.RemoveAll(container); err != nil {
+				if err := removeWorktreeDirectory(poolDir, worktree.Path); err != nil {
 					clearReservation(&state.Worktrees[idx])
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "could not remove worktree directory", err.Error()))
 					continue
@@ -553,13 +547,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipRemoveFailed, "VCS refused to remove worktree", err.Error()))
 					continue
 				}
-				container, err := removableWorktreeContainer(poolDir, worktree.Path)
-				if err != nil {
-					clearReservation(&state.Worktrees[idx])
-					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "refusing unsafe cleanup path", err.Error()))
-					continue
-				}
-				if err := os.RemoveAll(container); err != nil {
+				if err := removeWorktreeDirectory(poolDir, worktree.Path); err != nil {
 					clearReservation(&state.Worktrees[idx])
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "could not remove worktree directory", err.Error()))
 					continue
@@ -646,11 +634,11 @@ func finalOrphanPruneSafetyCheck(poolDir string, wt WorktreeEntry) (PruneWorktre
 		return worktree, newPruneSkipped(wt.Name, wt.Path, PruneSkipOrphanedBackingRepo, pruneOrphanRecoveredRepository, detail)
 	}
 
-	container, err := removableWorktreeContainer(poolDir, worktree.Path)
+	_, err = removableWorktreeContainer(poolDir, worktree.Path)
 	if err != nil {
 		return worktree, newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "refusing unsafe cleanup path", err.Error())
 	}
-	bytes, err := dirSize(container)
+	bytes, err := dirSize(worktree.Path)
 	if err != nil {
 		return worktree, newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "cannot measure size", err.Error())
 	}
@@ -674,12 +662,12 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 			return worktree, skipped, true, pruneContext{}, nil
 		}
 
-		container, err := removableWorktreeContainer(poolDir, worktree.Path)
+		_, err := removableWorktreeContainer(poolDir, worktree.Path)
 		if err != nil {
 			skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "refusing unsafe cleanup path", err.Error())
 			return worktree, skipped, true, pruneContext{}, nil
 		}
-		bytes, err := dirSize(container)
+		bytes, err := dirSize(worktree.Path)
 		if err != nil {
 			skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "cannot measure size", err.Error())
 			return worktree, skipped, true, pruneContext{}, nil
@@ -729,12 +717,12 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 		return worktree, skipped, true, context, nil
 	}
 
-	container, err := removableWorktreeContainer(poolDir, worktree.Path)
+	_, err = removableWorktreeContainer(poolDir, worktree.Path)
 	if err != nil {
 		skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "refusing unsafe cleanup path", err.Error())
 		return worktree, skipped, true, context, nil
 	}
-	bytes, err := dirSize(container)
+	bytes, err := dirSize(worktree.Path)
 	if err != nil {
 		skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "cannot measure size", err.Error())
 		return worktree, skipped, true, context, nil
@@ -865,26 +853,38 @@ func linkedWorktreeGitDir(worktreePath string) (string, bool, string) {
 	return filepath.Clean(gitDir), true, ""
 }
 
-// removableWorktreeContainer returns the directory to delete for a worktree.
-//
-// Under the built-in layout the worktree's parent is the numbered slot directory
-// that exists only to hold it, so removing the parent leaves no empty shell
-// behind. A worktree that worktree_path placed outside the pool has a parent
-// treehouse does not own - a directory holding the repository, other checkouts,
-// or anything else - so only the worktree itself is removed there.
+// removeWorktreeDirectory removes only the target's contents. A pool-owned
+// parent is optional cleanup: os.Remove succeeds only when it is empty, so
+// siblings and files beside the target are never recursively deleted.
+func removeWorktreeDirectory(poolDir, worktreePath string) error {
+	container, err := removableWorktreeContainer(poolDir, worktreePath)
+	if err != nil {
+		return fmt.Errorf("refusing unsafe cleanup path: %w", err)
+	}
+	if err := os.RemoveAll(worktreePath); err != nil {
+		return err
+	}
+	if container != filepath.Clean(worktreePath) {
+		// Failure leaves only the parent behind; it must not undo a successful
+		// worktree removal or keep a missing worktree registered in state.
+		_ = os.Remove(container)
+	}
+	return nil
+}
+
+// removableWorktreeContainer returns the pool-owned parent eligible for empty
+// directory cleanup, or the worktree itself when its parent is not pool-owned.
+// The returned parent must never be removed recursively: distinct worktrees or
+// other files can share it.
 //
 // Ownership is decided on canonicalized paths, exactly as placement decides it:
-// a recorded path that reaches its parent through a symlink out of the pool
-// still reads as pool-owned lexically, and os.RemoveAll on it would follow the
-// link and take everything beside the worktree in the real directory. The path
-// returned is the recorded spelling, which is what has to be deleted. A path
-// that cannot be resolved is an error, so callers skip the removal rather than
-// widen it.
+// a recorded parent reached through a symlink out of the pool can look pool-owned
+// lexically without being owned physically. Keep the recorded spelling for the
+// optional empty-parent removal; never remove an external parent. A path that
+// cannot be resolved is an error, so callers skip removal rather than widen it.
 //
-// Each branch guards the path it returns and nothing else. A worktree placed
-// directly under a filesystem or drive root has a parent that is never a pool
-// slot directory, so the worktree itself is removable and refusing on the
-// parent's behalf would only make such a slot unreclaimable.
+// A worktree placed directly under a filesystem or drive root has a parent
+// that is never a pool slot directory, so only the worktree is removable.
 func removableWorktreeContainer(poolDir, worktreePath string) (string, error) {
 	container := filepath.Clean(filepath.Dir(worktreePath))
 	poolOwned, err := containerIsPoolOwned(poolDir, container)
@@ -904,9 +904,9 @@ func removableWorktreeContainer(poolDir, worktreePath string) (string, error) {
 	return container, nil
 }
 
-// containerIsPoolOwned reports whether container is a slot directory the pool
-// created for one worktree: inside the pool directory, and not the pool
-// directory itself, which holds the pool's state.
+// containerIsPoolOwned reports whether container is inside the pool directory,
+// but not the pool directory itself, which holds the pool's state. Ownership
+// permits only empty-directory cleanup, not recursive removal.
 func containerIsPoolOwned(poolDir, container string) (bool, error) {
 	canonicalPool, err := canonicalPathPrefix(poolDir)
 	if err != nil {

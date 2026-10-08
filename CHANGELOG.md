@@ -6,6 +6,77 @@
 
 * **pool:** prevent duplicate pool records from filesystem path aliases while preserving live work (GRE-1933).
 
+## [4.0.0](https://github.com/MrGTV-love/treehouse/compare/v3.1.2...v4.0.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cmd:** `treehouse return` now exits 3, not 0, when it leaves a dirty worktree in place, and `treehouse get` does the same when its subshell exits leaving one dirty. Callers that read exit 0 as "the slot was released" were reading the bug this fixes; scripts under `set -e`, or using `treehouse return "$p" && next-step`, will now stop or branch differently at a dirty abort. Pass --force to clean and return, or treat exit 3 as "not returned".
+* **cmd:** the `treehouse destroy --force` flag is removed. Replace it with the specific --include-unlanded / --include-in-use / --include-leased flag(s) for the risk you intend to override, plus --yes, and pass an explicit pool path to --all.
+
+### Features
+
+* add --root flag and TREEHOUSE_ROOT env for the worktree root ([#93](https://github.com/MrGTV-love/treehouse/issues/93)) ([5e3d282](https://github.com/MrGTV-love/treehouse/commit/5e3d282592dfef5e60a5027797aa917f08c6cbf0))
+* add Nix package manager install support ([#113](https://github.com/MrGTV-love/treehouse/issues/113)) ([4307a30](https://github.com/MrGTV-love/treehouse/commit/4307a30f6d18457200dbd15954a56d75749454b8))
+* add no-fetch worktree acquisition ([164d903](https://github.com/MrGTV-love/treehouse/commit/164d9036569a406d664f988f064c6a58eea1a645))
+* add per-acquisition file seeding manifests ([#131](https://github.com/MrGTV-love/treehouse/issues/131)) ([67c9f2f](https://github.com/MrGTV-love/treehouse/commit/67c9f2fd5e662321b3481255ffa633540d5d793e))
+* **cmd:** add global prune mode ([#26](https://github.com/MrGTV-love/treehouse/issues/26)) ([6de3a91](https://github.com/MrGTV-love/treehouse/commit/6de3a9150453cc5cf5fb4e95627788551adae66c))
+* **cmd:** make destroy safe by default ([#37](https://github.com/MrGTV-love/treehouse/issues/37)) ([0190382](https://github.com/MrGTV-love/treehouse/commit/0190382c6f3b95025667b5b01e688e779bf3c516))
+* **cmd:** report checked-out branches in status ([#134](https://github.com/MrGTV-love/treehouse/issues/134)) ([ee8652b](https://github.com/MrGTV-love/treehouse/commit/ee8652b8464ae1d673053a627e7dad75ac2f3406))
+* **cmd:** return a worktree by name and add return --all ([#143](https://github.com/MrGTV-love/treehouse/issues/143)) ([99f4db2](https://github.com/MrGTV-love/treehouse/commit/99f4db2bbeececc1e6f136a88f79002e5a707174))
+* **config:** add configurable root for pool directory ([#12](https://github.com/MrGTV-love/treehouse/issues/12)) ([0bc1378](https://github.com/MrGTV-love/treehouse/commit/0bc1378b758ac93bb4ca430a942e87a5c3b8f020))
+* initial project setup ([bfc295d](https://github.com/MrGTV-love/treehouse/commit/bfc295dd52e0452b5a69ea2642864449380d54b5))
+* **nix:** add flake.nix and flake.lock ([#15](https://github.com/MrGTV-love/treehouse/issues/15)) ([500d2f9](https://github.com/MrGTV-love/treehouse/commit/500d2f9e26429d02e8378142556af8ad9be8cbd0))
+* **pool:** add durable worktree leases ([#35](https://github.com/MrGTV-love/treehouse/issues/35)) ([97d6708](https://github.com/MrGTV-love/treehouse/commit/97d67089ea55cba166c3f4d5332e9a7a09206057))
+* **pool:** add lease command to durably lease an existing worktree ([#128](https://github.com/MrGTV-love/treehouse/issues/128)) ([b227e59](https://github.com/MrGTV-love/treehouse/commit/b227e59cf73fd15d69f00b580da0f5bee6b38fce))
+* **pool:** add stable lease identities ([#68](https://github.com/MrGTV-love/treehouse/issues/68)) ([e914cca](https://github.com/MrGTV-love/treehouse/commit/e914cca93693be4c47e0a4df1bf7439afd5e820a))
+* **pool:** add user lifecycle hooks ([#22](https://github.com/MrGTV-love/treehouse/issues/22)) ([9c70d0b](https://github.com/MrGTV-love/treehouse/commit/9c70d0b73c6ca1c1783828f3e9d215612993a3b4))
+* **pool:** classify orphaned worktrees during prune ([#28](https://github.com/MrGTV-love/treehouse/issues/28)) ([836044f](https://github.com/MrGTV-love/treehouse/commit/836044f85e992d2fd65969dca387704998c144b6))
+* **pool:** make where a new pool worktree is placed configurable ([#140](https://github.com/MrGTV-love/treehouse/issues/140)) ([6d33753](https://github.com/MrGTV-love/treehouse/commit/6d33753e94ac3ddf08d7953f3e200ba9bb8b00d5))
+* **pool:** opt-in unique worktree directory names for get ([#126](https://github.com/MrGTV-love/treehouse/issues/126)) ([cee9ea1](https://github.com/MrGTV-love/treehouse/commit/cee9ea11337afea0e5e1431317b81200d4e8bd18))
+* **pool:** seed ignored files from .worktreeinclude ([#129](https://github.com/MrGTV-love/treehouse/issues/129)) ([0e87c62](https://github.com/MrGTV-love/treehouse/commit/0e87c62b0494fd08bc5df230797cfb44a10dd814))
+* **pool:** support configurable base branch for get ([#119](https://github.com/MrGTV-love/treehouse/issues/119)) ([c98e9de](https://github.com/MrGTV-love/treehouse/commit/c98e9de0a8ad85d9551ccce85ecd96c8b9a8dff5))
+* **prune:** add safe stale worktree pruning ([#24](https://github.com/MrGTV-love/treehouse/issues/24)) ([3395c20](https://github.com/MrGTV-love/treehouse/commit/3395c20e41dbb563e3437c4a0a5e031ce042ca2a))
+* **status:** show current worktree status ([75b24a0](https://github.com/MrGTV-love/treehouse/commit/75b24a0b8a0fe2ea4ed88e8a28288c529403e951))
+* use latest default branch for worktree ([df3ee7b](https://github.com/MrGTV-love/treehouse/commit/df3ee7b364aab64e1d7099422815ebeb43dc6c58))
+* **vcs:** add opt-in Jujutsu (jj) workspace backend behind a VCS seam ([#100](https://github.com/MrGTV-love/treehouse/issues/100)) ([a2e554c](https://github.com/MrGTV-love/treehouse/commit/a2e554c15e0c8de0e8cbc0e45549acc59f6b97f9))
+* **vcs:** slot-flavor dispatch, flavor-aware acquire, and markerless fail-closed hardening ([#110](https://github.com/MrGTV-love/treehouse/issues/110)) ([c88b53e](https://github.com/MrGTV-love/treehouse/commit/c88b53ef6149054435fd375806117dfcd8371a0d))
+
+
+### Bug Fixes
+
+* app update permission error ([0559e99](https://github.com/MrGTV-love/treehouse/commit/0559e99680c8d1f0a99f969c9fdf5407e4027aa3))
+* CI failures ([d744564](https://github.com/MrGTV-love/treehouse/commit/d744564529cad1975c78a29b2b8ed4d61d529977))
+* **ci:** make update-vendor-hash fork-aware for checkout and push ([#105](https://github.com/MrGTV-love/treehouse/issues/105)) ([6c40205](https://github.com/MrGTV-love/treehouse/commit/6c40205c69855998ed2fac19d3c75751b504243a))
+* **ci:** suppress pull_request runs on release-please PRs ([#77](https://github.com/MrGTV-love/treehouse/issues/77)) ([da7eda2](https://github.com/MrGTV-love/treehouse/commit/da7eda26e5f26e0a1bf87a0d67e7553d72952cdf))
+* **cli:** expose version flag and set rootCmd.Version ([ac84c4a](https://github.com/MrGTV-love/treehouse/commit/ac84c4a38c72b75a9fe633e138b50aaf66d20e26))
+* **cmd:** detach worktrees before pool reuse ([#19](https://github.com/MrGTV-love/treehouse/issues/19)) ([0d849a3](https://github.com/MrGTV-love/treehouse/commit/0d849a3b82a8647f507b1e2f186dc041c930fe35))
+* **cmd:** exit non-zero when a dirty worktree is not returned ([#138](https://github.com/MrGTV-love/treehouse/issues/138)) ([e57daab](https://github.com/MrGTV-love/treehouse/commit/e57daab3e0c038750d251c779d1c3e294156fa7f))
+* **cmd:** paste-safe dirty non-TTY return --force hints ([#122](https://github.com/MrGTV-love/treehouse/issues/122)) ([59762c9](https://github.com/MrGTV-love/treehouse/commit/59762c9dd545cca29517e6b7333ec5a23e67ee85))
+* **cmd:** resolve main repo root for pool commands run inside a worktree ([#51](https://github.com/MrGTV-love/treehouse/issues/51)) ([3fcd637](https://github.com/MrGTV-love/treehouse/commit/3fcd63771a6368fa357a9a4079a9b6e242202dcb))
+* **config:** warn when repository hooks are ignored ([#141](https://github.com/MrGTV-love/treehouse/issues/141)) ([8e3ceff](https://github.com/MrGTV-love/treehouse/commit/8e3ceffb090d335ea459fa5bd53754ac3a87b6b4))
+* detect squash-merged worktrees ([#88](https://github.com/MrGTV-love/treehouse/issues/88)) ([a651776](https://github.com/MrGTV-love/treehouse/commit/a651776a47a2911d260c55472ccdfc5f6a3aeaf8))
+* **get:** skip reclaiming a pool slot that holds unlanded work ([#104](https://github.com/MrGTV-love/treehouse/issues/104)) ([04d8725](https://github.com/MrGTV-love/treehouse/commit/04d87252f918dc3942318817b74413bf55f5b3eb))
+* ignore in-project pool via .git/info/exclude ([fdb3f99](https://github.com/MrGTV-love/treehouse/commit/fdb3f99ba1c7c6d24db7efbcbb569a61f6535489))
+* install under ~/.local/bin when in PATH ([08bb5b6](https://github.com/MrGTV-love/treehouse/commit/08bb5b6ec2fa91d2f9e426164cd3313d90812918))
+* pin nix-build to flake-locked nixpkgs and extract package.nix ([#135](https://github.com/MrGTV-love/treehouse/issues/135)) ([30723fc](https://github.com/MrGTV-love/treehouse/commit/30723fc0baa2ce05969c96dd245a163333945596))
+* **pool:** make state persistence atomic and recoverable ([#55](https://github.com/MrGTV-love/treehouse/issues/55)) ([c76015d](https://github.com/MrGTV-love/treehouse/commit/c76015d914e8ae7068c024c68c58860e10e8ee52))
+* **pool:** preserve physical slot identity and distinct live siblings ([#3](https://github.com/MrGTV-love/treehouse/issues/3)) ([83c62ae](https://github.com/MrGTV-love/treehouse/commit/83c62ae858514f2c327c99d3586088214d66e270))
+* **pool:** prune stale worktree registrations before adding in get ([844acc4](https://github.com/MrGTV-love/treehouse/commit/844acc4d1d7d8078f1110295689d94853a921dd7)), closes [#31](https://github.com/MrGTV-love/treehouse/issues/31)
+* **pool:** reclaim safe foreign-clone worktrees at the shared cap ([#1](https://github.com/MrGTV-love/treehouse/issues/1)) ([dee47c6](https://github.com/MrGTV-love/treehouse/commit/dee47c663e18fd973101e2cc22530001fdb438df))
+* **pool:** report only the processes return would terminate in status ([#139](https://github.com/MrGTV-love/treehouse/issues/139)) ([af57b33](https://github.com/MrGTV-love/treehouse/commit/af57b33ff8a80b3b1b476b3f060677a3271201a5))
+* **process:** safely clean up lingering worktree processes ([#17](https://github.com/MrGTV-love/treehouse/issues/17)) ([c1e443d](https://github.com/MrGTV-love/treehouse/commit/c1e443de639d3bf5a867e71f218153c4816c78ef))
+* **process:** wait for SIGKILLed processes to be reaped before return runs git ([#102](https://github.com/MrGTV-love/treehouse/issues/102)) ([664adf8](https://github.com/MrGTV-love/treehouse/commit/664adf81e4a427080449aa8e4b76b53cc54f8a24))
+* recheck app update when cached version is stale ([21d93e2](https://github.com/MrGTV-love/treehouse/commit/21d93e2e36eb3948623e21a6e92c520bae476da9))
+* **return:** refuse to reset a worktree that still has live writers ([#103](https://github.com/MrGTV-love/treehouse/issues/103)) ([978da87](https://github.com/MrGTV-love/treehouse/commit/978da8750da4f6faebbef90ccdb23aaac6211118))
+* **shell:** start supported user shells as interactive login sessions ([#120](https://github.com/MrGTV-love/treehouse/issues/120)) ([db06078](https://github.com/MrGTV-love/treehouse/commit/db06078c6f5569e539b8cdb7703f38fdefe06382))
+* shorter version display ([9c51b35](https://github.com/MrGTV-love/treehouse/commit/9c51b35fdb34cc1230d14c6695cd32f04345cf9b))
+* update repository URLs ([b9d1fda](https://github.com/MrGTV-love/treehouse/commit/b9d1fda8f919411002e8d5119e35693e7a97fbbe))
+* update vendor hash handling in workflow ([fe692a5](https://github.com/MrGTV-love/treehouse/commit/fe692a5fdce020a003581abece3d7eacf88dfb03))
+* **updater:** replace a running Windows exe without a fixed .old backup ([#121](https://github.com/MrGTV-love/treehouse/issues/121)) ([bdbd0f8](https://github.com/MrGTV-love/treehouse/commit/bdbd0f89164ba87cda5d48b53dfb3e04836dc6f7))
+* use remote URL for pool hash for local repos ([7b13a4d](https://github.com/MrGTV-love/treehouse/commit/7b13a4dd52dbef7270cd1535575e1a0610d8d296))
+* windows test failure ([4e24e5f](https://github.com/MrGTV-love/treehouse/commit/4e24e5ff502e502f657bb417ea74a44012a28eb8))
+
 ## [3.1.2](https://github.com/kunchenguid/treehouse/compare/v3.1.1...v3.1.2) (2026-10-02)
 
 

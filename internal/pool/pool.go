@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -73,6 +74,10 @@ type WorktreeStatus struct {
 	// alone cannot answer that, because StatusHere hides whichever
 	// classification the slot would otherwise have carried.
 	HeldOnlyByCwd bool
+	// ChangedDuringScan means the persisted slot record changed or disappeared
+	// while List inspected the snapshot. Lease fields still describe the snapshot;
+	// process and VCS fields are observations made during the unlocked scan.
+	ChangedDuringScan bool
 }
 
 // LeaseInfo is the stable machine-readable identity of one lease acquisition.
@@ -1158,7 +1163,10 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 	return nil
 }
 
-// List returns the current status of managed worktrees in poolDir.
+// List reports a locked snapshot of pool membership and reservations, enriched
+// by process and VCS observations collected without the state lock. Records that
+// differ at the final atomic state read are marked ChangedDuringScan; their lease
+// identity, holder and timestamp still describe the original snapshot.
 // Leased worktrees are reported with StatusLeased and their optional holder.
 // An idle slot whose .git/.jj marker is gone is reported StatusDamaged: its
 // dirtiness is never read, because dispatch on a markerless path falls back to
@@ -1172,10 +1180,10 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 // were merely observing. Those PIDs are gone by the time anyone checks them,
 // which reads as a stale snapshot of real leftover processes.
 func List(poolDir string) ([]WorktreeStatus, error) {
-	var result []WorktreeStatus
-
-	err := WithStateLock(poolDir, func() error {
-		state, err := ReadState(poolDir)
+	var state State
+	err := withStateLock(poolDir, func() error {
+		var err error
+		state, err = ReadState(poolDir)
 		if err != nil {
 			return err
 		}
@@ -1187,109 +1195,178 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		if err := WriteState(poolDir, state); err != nil {
 			return err
 		}
+		// Reload the canonical serialized values (including recovered timestamps
+		// and authenticated inventory) used by the final change comparison.
+		state, err = ReadState(poolDir)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
 
-		cwd, _ := os.Getwd()
+	cwd, _ := os.Getwd()
+	var result []WorktreeStatus
+	for i, wt := range state.Worktrees {
+		if wt.Destroying {
+			continue
+		}
+		// The two failure modes get different answers, which is why the
+		// scan and the filter run as separate steps here. An
+		// ancestry-lookup failure keeps the raw scan rather than falling
+		// back to an empty list: listing a process the caller owns costs a
+		// confusing line, while reporting a slot quiet that is not is a
+		// wrong answer to the only question this column exists to answer.
+		// A failed process-table read cannot be answered at all: the slot
+		// is reported StatusUnverified (the machine-readable half) and the
+		// error is warned loudly on stderr (the diagnostic half), instead
+		// of silently presenting every slot as quiet.
+		procs, scanErr := findProcessesInWorktree(wt.Path)
+		if wt.Leased && wt.LeaseHolder == RecoveredLeaseHolder {
+			wt, err = recoverListedEntry(poolDir, wt, procs, scanErr)
+			if err != nil {
+				return nil, err
+			}
+			state.Worktrees[i] = wt
+		}
+		ws := WorktreeStatus{
+			Name:           wt.Name,
+			Path:           wt.Path,
+			Status:         StatusAvailable,
+			Flavor:         vcs.WorktreeBackendName(wt.Path),
+			RecoveryReason: wt.RecoveryReason,
+			RecoveryBackup: recoveryBackup(poolDir, wt.Name),
+		}
+		if scanErr != nil {
+			fmt.Fprintf(os.Stderr, "treehouse: WARNING: could not read the process table to see what is running in %s (%v); it is reported %s with no processes.\n", wt.Path, scanErr, StatusUnverified)
+		} else if unprotected, filterErr := dropProtectedProcesses(procs); filterErr == nil {
+			procs = unprotected
+		}
+		ws.Processes = procs
 
-		for _, wt := range state.Worktrees {
-			if wt.Destroying {
+		// "you're here" is now read from the caller's cwd alone. It used
+		// to require a process in the slot, which was only ever the
+		// caller's own shell - the very entry this list stopped reporting.
+		//
+		// Which checkout is in this slot. A markerless (damaged) slot is
+		// never read, so the branch of a repository enclosing the pool can
+		// never be inherited. Detached, jj, and markerless slots report an
+		// empty branch; a failed read is reported as BranchErr instead of
+		// collapsing into that empty value.
+		branch, detached, branchErr := vcs.CheckedOutBranch(wt.Path)
+		ws.Branch = branch
+		ws.Detached = detached
+		if branchErr != nil {
+			ws.BranchErr = branchErr.Error()
+		}
+		// The slot is classified WITHOUT the cwd, which is then laid over
+		// the answer. The ranking the operator sees is unchanged - leased
+		// and a live owner reservation still outrank "you're here", and it
+		// still outranks everything below - but the classification it hides
+		// is now known, so a caller can tell a slot somebody holds from one
+		// whose only claim is the shell standing in it.
+		// healState already checked this identity while taking the snapshot.
+		owned := wt.OwnerPID != 0
+		switch {
+		case wt.Leased:
+			ws.Status = StatusLeased
+			ws.LeaseID = wt.LeaseID
+			ws.LeaseHolder = wt.LeaseHolder
+			ws.LeasedAt = wt.LeasedAt
+		case owned:
+			ws.Status = StatusInUse
+		case scanErr != nil:
+			ws.Status = StatusUnverified
+		case len(procs) > 0:
+			ws.Status = StatusInUse
+		case ws.Flavor == "":
+			ws.Status = StatusDamaged
+		default:
+			if dirty, _ := vcs.IsDirty(wt.Path); dirty {
+				ws.Status = StatusDirty
+			}
+		}
+		// Damaged is not overlaid. A missing marker is a different kind of
+		// fact from the reservations above: it says the slot's own contents
+		// cannot be judged at all, which is what `destroy` - not `return` -
+		// answers, and standing in such a slot does not make it any more
+		// readable. The recovery-scan case below already forces damaged
+		// back over the overlay for exactly this reason.
+		if !wt.Leased && !owned && ws.Status != StatusDamaged && process.WorktreeContainsCwd(wt.Path, cwd) {
+			ws.HeldOnlyByCwd = ws.Status == StatusAvailable
+			ws.Status = StatusHere
+		}
+
+		// A slot the recovery scan could not inspect (its marker exists but
+		// could not be read) is reported damaged rather than leased, so the
+		// read failure is never mistaken for an available or ordinarily leased
+		// home. It remains leased underneath (LeaseHolder is already set
+		// above), so Acquire and prune keep skipping it exactly like every
+		// other recovered entry.
+		if wt.RecoveryError != "" {
+			ws.Status = StatusDamaged
+			ws.BranchErr = wt.RecoveryError
+		}
+
+		result = append(result, ws)
+	}
+
+	// Atomic state replacement makes this read safe without reacquiring the
+	// lock. Never write the snapshot back: get/return/prune may have changed
+	// membership or leases while the observations above were in flight.
+	latest, err := ReadState(poolDir)
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]*WorktreeEntry, len(latest.Worktrees))
+	for i := range latest.Worktrees {
+		wt := &latest.Worktrees[i]
+		byName[wt.Name] = wt
+	}
+	row := 0
+	for _, wt := range state.Worktrees {
+		if wt.Destroying {
+			continue
+		}
+		current, exists := byName[wt.Name]
+		result[row].ChangedDuringScan = !exists || !reflect.DeepEqual(&wt, current)
+		row++
+	}
+	return result, nil
+}
+
+// recoverListedEntry preserves status-triggered automatic recovery without a
+// locked process-table walk. The raw (not caller-filtered) scan was just taken
+// outside the lock. Only an unchanged quarantined record may use that evidence;
+// a return, re-lease, or removal wins and must never be overwritten. The remaining
+// filesystem checks and any backup moves still run under the mutation lock.
+func recoverListedEntry(poolDir string, snapshot WorktreeEntry, procs []process.ProcessInfo, scanErr error) (WorktreeEntry, error) {
+	err := withStateLock(poolDir, func() error {
+		current, err := ReadState(poolDir)
+		if err != nil {
+			return err
+		}
+		for i := range current.Worktrees {
+			wt := &current.Worktrees[i]
+			if wt.Name != snapshot.Name || !reflect.DeepEqual(*wt, snapshot) {
 				continue
 			}
-			ws := WorktreeStatus{
-				Name:           wt.Name,
-				Path:           wt.Path,
-				Status:         StatusAvailable,
-				Flavor:         vcs.WorktreeBackendName(wt.Path),
-				RecoveryReason: wt.RecoveryReason,
-				RecoveryBackup: recoveryBackup(poolDir, wt.Name),
+			reason := recoverSafeEntryWithScan(poolDir, wt, func(string) ([]process.ProcessInfo, error) {
+				return procs, scanErr
+			})
+			if reason == "" {
+				releaseEntry(wt)
+			} else {
+				wt.RecoveryReason = reason
 			}
-
-			// The two failure modes get different answers, which is why the
-			// scan and the filter run as separate steps here. An
-			// ancestry-lookup failure keeps the raw scan rather than falling
-			// back to an empty list: listing a process the caller owns costs a
-			// confusing line, while reporting a slot quiet that is not is a
-			// wrong answer to the only question this column exists to answer.
-			// A failed process-table read cannot be answered at all: the slot
-			// is reported StatusUnverified (the machine-readable half) and the
-			// error is warned loudly on stderr (the diagnostic half), instead
-			// of silently presenting every slot as quiet.
-			procs, scanErr := findProcessesInWorktree(wt.Path)
-			if scanErr != nil {
-				fmt.Fprintf(os.Stderr, "treehouse: WARNING: could not read the process table to see what is running in %s (%v); it is reported %s with no processes.\n", wt.Path, scanErr, StatusUnverified)
-			} else if unprotected, filterErr := dropProtectedProcesses(procs); filterErr == nil {
-				procs = unprotected
+			if err := WriteState(poolDir, current); err != nil {
+				return err
 			}
-			ws.Processes = procs
-
-			// "you're here" is now read from the caller's cwd alone. It used
-			// to require a process in the slot, which was only ever the
-			// caller's own shell - the very entry this list stopped reporting.
-			//
-			// Which checkout is in this slot. A markerless (damaged) slot is
-			// never read, so the branch of a repository enclosing the pool can
-			// never be inherited. Detached, jj, and markerless slots report an
-			// empty branch; a failed read is reported as BranchErr instead of
-			// collapsing into that empty value.
-			branch, detached, branchErr := vcs.CheckedOutBranch(wt.Path)
-			ws.Branch = branch
-			ws.Detached = detached
-			if branchErr != nil {
-				ws.BranchErr = branchErr.Error()
-			}
-			// The slot is classified WITHOUT the cwd, which is then laid over
-			// the answer. The ranking the operator sees is unchanged - leased
-			// and a live owner reservation still outrank "you're here", and it
-			// still outranks everything below - but the classification it hides
-			// is now known, so a caller can tell a slot somebody holds from one
-			// whose only claim is the shell standing in it.
-			owned := ownerAlive(wt)
-			switch {
-			case wt.Leased:
-				ws.Status = StatusLeased
-				ws.LeaseID = wt.LeaseID
-				ws.LeaseHolder = wt.LeaseHolder
-				ws.LeasedAt = wt.LeasedAt
-			case owned:
-				ws.Status = StatusInUse
-			case scanErr != nil:
-				ws.Status = StatusUnverified
-			case len(procs) > 0:
-				ws.Status = StatusInUse
-			case ws.Flavor == "":
-				ws.Status = StatusDamaged
-			default:
-				if dirty, _ := vcs.IsDirty(wt.Path); dirty {
-					ws.Status = StatusDirty
-				}
-			}
-			// Damaged is not overlaid. A missing marker is a different kind of
-			// fact from the reservations above: it says the slot's own contents
-			// cannot be judged at all, which is what `destroy` - not `return` -
-			// answers, and standing in such a slot does not make it any more
-			// readable. The recovery-scan case below already forces damaged
-			// back over the overlay for exactly this reason.
-			if !wt.Leased && !owned && ws.Status != StatusDamaged && process.WorktreeContainsCwd(wt.Path, cwd) {
-				ws.HeldOnlyByCwd = ws.Status == StatusAvailable
-				ws.Status = StatusHere
-			}
-
-			// A slot the recovery scan could not inspect (its marker exists but
-			// could not be read) is reported damaged rather than leased, so the
-			// read failure is never mistaken for an available or ordinarily leased
-			// home. It remains leased underneath (LeaseHolder is already set
-			// above), so Acquire and prune keep skipping it exactly like every
-			// other recovered entry.
-			if wt.RecoveryError != "" {
-				ws.Status = StatusDamaged
-				ws.BranchErr = wt.RecoveryError
-			}
-
-			result = append(result, ws)
+			snapshot = *wt
+			return nil
 		}
 		return nil
 	})
-
-	return result, err
+	return snapshot, err
 }
 
 // FindByName returns the pool entry registered under name, or nil when this

@@ -937,7 +937,7 @@ func markAcquired(wt *WorktreeEntry, opts acquireOptions) error {
 }
 
 // ErrLeasePreconditionFailed reports that a conditional release no longer
-// identifies the worktree's current lease.
+// identifies the worktree's current lease or observed reservation.
 var ErrLeasePreconditionFailed = errors.New("lease precondition failed")
 
 // ErrRecoveredEntry reports that a release refusing recovered entries found the

@@ -77,10 +77,10 @@ the confirmation before uncommitted changes are discarded; declining one skips
 it and the rest still run. Each release is pinned to the reservation the listing
 saw: a slot is skipped unless the same lease, or the same absence of one, and the
 same 'treehouse get' session still hold it, so a slot leased, returned, or handed
-to another 'treehouse get' since the listing is left alone. --all takes no path or name, and cannot be combined with the
---if-lease-* conditions, which target a single lease identity. A slot
-'treehouse status' reports as recovered is never returned by --all; check it
-and return it by name.`,
+to another 'treehouse get' since the listing is left alone. --all takes no path
+or name, and cannot be combined with the --if-lease-* conditions, which target a
+single lease identity. A slot 'treehouse status' reports as recovered is never
+returned by --all; check it and return it by name.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed("if-lease-id") && returnIfLeaseID == "" {
 			return fmt.Errorf("--if-lease-id cannot be empty")
@@ -236,8 +236,9 @@ func returnableStatus(wt pool.WorktreeStatus) bool {
 // on the first dirty slot would leave the rest held with no indication which.
 //
 // A slot is skipped, and the run neither fails nor reports an abort for it,
-// when the lease on it is no longer the one the listing saw (returned or taken
-// over since) or when it is a recovered slot (below). Nothing went wrong in
+// when its reservation is no longer the one the listing saw (returned, taken
+// over, or handed to a new `treehouse get` since) or when it is a recovered slot
+// (below). Nothing went wrong in
 // either case, and calling them failures made a quarantined pool exit 1 on
 // every retry forever. A run where every slot was skipped still exits 0:
 // nothing it set out to return was still there to return.

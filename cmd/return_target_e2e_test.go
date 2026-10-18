@@ -347,6 +347,155 @@ func TestReturnAllSkipsASlotReacquiredMidRun(t *testing.T) {
 	}
 }
 
+// TestReturnAllSkipsASlotAPlainGetReservedAfterTheListing pins what the lock-free
+// listing owes `return --all`. The listing is a snapshot, so it can be older
+// than the run that acts on it. A slot observed in use by one `treehouse get`
+// session, then freed and reserved by a NEW plain `get` while an earlier
+// confirmation holds the run open, belongs to the new worker: --all must not
+// terminate its processes or reset its commits, and that skip is not a failure.
+func TestReturnAllSkipsASlotAPlainGetReservedAfterTheListing(t *testing.T) {
+	repoDir, homeDir := setupTestRepo(t)
+
+	dirty := acquireLeaseJSON(t, repoDir, homeDir, "dirty-agent")
+	if err := os.WriteFile(filepath.Join(dirty.Path, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first := startWaitingGet(t, repoDir, homeDir)
+	if first.Path == dirty.Path {
+		t.Fatalf("expected two distinct slots, both are %s", first.Path)
+	}
+
+	// The listing sees the first session's live owner reservation. The dirty
+	// leased slot prompts first, which holds the run open.
+	all, stdin, stderr := startReturnAllAtDirtyPrompt(t, repoDir, homeDir)
+
+	first.finish(t)
+	second := startWaitingGet(t, repoDir, homeDir)
+	if second.Path != first.Path {
+		t.Fatalf("expected the freed slot %s to be reserved again, got %s", first.Path, second.Path)
+	}
+	gitCmd(t, second.Path, "config", "user.email", "worker@example.com")
+	gitCmd(t, second.Path, "config", "user.name", "Worker")
+	if err := os.WriteFile(filepath.Join(second.Path, "new-worker.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, second.Path, "add", "new-worker.txt")
+	gitCmd(t, second.Path, "commit", "-m", "new worker")
+
+	output, waitErr := finishReturnAllAtPrompt(t, all, stdin, stderr, "y\n")
+	if waitErr != nil {
+		t.Fatalf("a skipped slot is not a failure, expected exit 0, got %v: %s", waitErr, output)
+	}
+	if !strings.Contains(output, "skipped: it is no longer the acquisition this run listed") {
+		t.Fatalf("expected the newly reserved slot to be reported skipped, got: %s", output)
+	}
+	if !strings.Contains(output, "Returned 1 of 2 held worktree(s); 1 skipped") {
+		t.Fatalf("expected the summary to count one return and one skip, got: %s", output)
+	}
+
+	if !second.running() {
+		t.Fatalf("return --all terminated the new worker's session; get stderr: %s", second.stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(second.Path, "new-worker.txt")); err != nil {
+		t.Fatalf("the new worker's commit was reset away: %v", err)
+	}
+	for _, entry := range statusEntries(t, repoDir, homeDir) {
+		switch entry.Path {
+		case dirty.Path:
+			if entry.Status != "available" {
+				t.Fatalf("expected the confirmed slot returned, got %+v", entry)
+			}
+		case second.Path:
+			if entry.Status != "in-use" {
+				t.Fatalf("expected the new worker's slot to stay in use, got %+v", entry)
+			}
+		}
+	}
+	second.finish(t)
+}
+
+// waitingGet is a plain `treehouse get` whose subshell stays alive until finish,
+// so its slot carries a LIVE owner reservation in the meantime.
+type waitingGet struct {
+	Path    string
+	release string
+	stderr  bytes.Buffer
+	done    chan struct{}
+	err     error
+}
+
+func startWaitingGet(t *testing.T, repoDir, homeDir string) *waitingGet {
+	t.Helper()
+
+	signals := t.TempDir()
+	ready := filepath.Join(signals, "ready")
+	w := &waitingGet{release: filepath.Join(signals, "release"), done: make(chan struct{})}
+	get := exec.Command(treehouseBin, "get")
+	get.Dir = repoDir
+	get.Env = buildEnv(homeDir,
+		"SHELL="+waitShellBin,
+		"TREEHOUSE_TEST_READY="+ready,
+		"TREEHOUSE_TEST_RELEASE="+w.release,
+	)
+	get.Stderr = &w.stderr
+	if err := get.Start(); err != nil {
+		t.Fatalf("failed to start get: %v", err)
+	}
+	go func() {
+		w.err = get.Wait()
+		close(w.done)
+	}()
+	t.Cleanup(func() {
+		_ = os.WriteFile(w.release, nil, 0o644)
+		select {
+		case <-w.done:
+		case <-time.After(30 * time.Second):
+			_ = get.Process.Kill()
+			<-w.done
+		}
+	})
+
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(ready); err == nil && len(b) > 0 {
+			w.Path = string(b)
+			return w
+		}
+		select {
+		case <-w.done:
+			t.Fatalf("get exited before its subshell reported a worktree: %v\n%s", w.err, w.stderr.String())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatalf("the get subshell never reported its worktree; get stderr: %s", w.stderr.String())
+	return nil
+}
+
+func (w *waitingGet) running() bool {
+	select {
+	case <-w.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// finish lets the subshell exit and waits for get's exit-time return.
+func (w *waitingGet) finish(t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(w.release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-w.done:
+	case <-time.After(60 * time.Second):
+		t.Fatalf("get did not exit after its subshell was released; stderr: %s", w.stderr.String())
+	}
+	if w.err != nil {
+		t.Fatalf("get exited with an error: %v\nstderr: %s", w.err, w.stderr.String())
+	}
+}
+
 // TestReturnAllSkipsQuarantinedSlotsWithoutFailing pins the other skip. A
 // rotated state key (a state version bump does the same) quarantines every
 // entry in a pool as recovered: nothing proves one idle, so only a return

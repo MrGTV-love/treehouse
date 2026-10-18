@@ -24,20 +24,19 @@ type statusJSONProcess struct {
 }
 
 type statusJSONWorktree struct {
-	Name              string              `json:"name"`
-	Path              string              `json:"path"`
-	Status            string              `json:"status"`
-	Branch            string              `json:"branch"`
-	Detached          bool                `json:"detached,omitempty"`
-	BranchErr         string              `json:"branch_error,omitempty"`
-	RecoveryReason    string              `json:"recovery_reason,omitempty"`
-	RecoveryBackup    string              `json:"recovery_backup,omitempty"`
-	Flavor            string              `json:"flavor,omitempty"`
-	LeaseID           string              `json:"lease_id"`
-	LeaseHolder       string              `json:"lease_holder"`
-	LeasedAt          *time.Time          `json:"leased_at"`
-	Processes         []statusJSONProcess `json:"processes"`
-	ChangedDuringScan bool                `json:"changed_during_scan,omitempty"`
+	Name           string              `json:"name"`
+	Path           string              `json:"path"`
+	Status         string              `json:"status"`
+	Branch         string              `json:"branch"`
+	Detached       bool                `json:"detached,omitempty"`
+	BranchErr      string              `json:"branch_error,omitempty"`
+	RecoveryReason string              `json:"recovery_reason,omitempty"`
+	RecoveryBackup string              `json:"recovery_backup,omitempty"`
+	Flavor         string              `json:"flavor,omitempty"`
+	LeaseID        string              `json:"lease_id"`
+	LeaseHolder    string              `json:"lease_holder"`
+	LeasedAt       *time.Time          `json:"leased_at"`
+	Processes      []statusJSONProcess `json:"processes"`
 }
 
 var statusCmd = &cobra.Command{
@@ -136,9 +135,6 @@ var statusCmd = &cobra.Command{
 					line += yellow(fmt.Sprintf("  (no .git or .jj marker — 'treehouse destroy %s --include-unlanded' to remove)", ui.PrettyPath(wt.Path)))
 				}
 			}
-			if wt.ChangedDuringScan {
-				line += yellow("  (changed during scan; showing snapshot)")
-			}
 			fmt.Fprintln(os.Stdout, line)
 
 			if len(wt.Processes) > 0 {
@@ -181,19 +177,18 @@ func writeStatusJSON(worktrees []pool.WorktreeStatus) error {
 	output := make([]statusJSONWorktree, 0, len(worktrees))
 	for _, wt := range worktrees {
 		item := statusJSONWorktree{
-			Name:              wt.Name,
-			Path:              wt.Path,
-			Status:            wt.Status,
-			Branch:            wt.Branch,
-			Detached:          wt.Detached,
-			BranchErr:         wt.BranchErr,
-			RecoveryReason:    wt.RecoveryReason,
-			RecoveryBackup:    wt.RecoveryBackup,
-			Flavor:            wt.Flavor,
-			LeaseID:           wt.LeaseID,
-			LeaseHolder:       wt.LeaseHolder,
-			Processes:         make([]statusJSONProcess, 0, len(wt.Processes)),
-			ChangedDuringScan: wt.ChangedDuringScan,
+			Name:           wt.Name,
+			Path:           wt.Path,
+			Status:         wt.Status,
+			Branch:         wt.Branch,
+			Detached:       wt.Detached,
+			BranchErr:      wt.BranchErr,
+			RecoveryReason: wt.RecoveryReason,
+			RecoveryBackup: wt.RecoveryBackup,
+			Flavor:         wt.Flavor,
+			LeaseID:        wt.LeaseID,
+			LeaseHolder:    wt.LeaseHolder,
+			Processes:      make([]statusJSONProcess, 0, len(wt.Processes)),
 		}
 		if !wt.LeasedAt.IsZero() {
 			leasedAt := wt.LeasedAt

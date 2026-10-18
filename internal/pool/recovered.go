@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kunchenguid/treehouse/v3/internal/process"
 	"github.com/kunchenguid/treehouse/v3/internal/vcs"
 )
 
@@ -50,17 +49,13 @@ func recoverQuarantinedEntries(poolDir string) error {
 // backup first where the platform supports it. It returns "" when the slot may
 // be freed, and otherwise why it stays quarantined.
 func recoverSafeEntry(poolDir string, wt *WorktreeEntry) string {
-	return recoverSafeEntryWithScan(poolDir, wt, findProcessesInWorktree)
-}
-
-func recoverSafeEntryWithScan(poolDir string, wt *WorktreeEntry, scan func(string) ([]process.ProcessInfo, error)) string {
 	if wt.RecoveryError != "" {
 		return "its VCS marker could not be read, so it cannot be verified automatically"
 	}
 	if vcs.WorktreeBackendName(wt.Path) != "git" {
 		return "automatic safety verification is only available for Git worktrees"
 	}
-	procs, err := scan(wt.Path)
+	procs, err := findProcessesInWorktree(wt.Path)
 	if err != nil {
 		return "cannot verify whether a process is using this worktree"
 	}

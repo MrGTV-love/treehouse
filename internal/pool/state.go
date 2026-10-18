@@ -526,18 +526,6 @@ func createTempStateFile(dir, base string, perm os.FileMode) (*os.File, string, 
 }
 
 func WithStateLock(poolDir string, fn func() error) error {
-	return withStateLock(poolDir, func() error {
-		if err := recoverQuarantinedEntries(poolDir); err != nil {
-			return err
-		}
-		return fn()
-	})
-}
-
-// withStateLock is the locking primitive without automatic recovery. List uses
-// it to snapshot state without running recovery's process scan under the lock.
-// Mutating operations must use WithStateLock instead.
-func withStateLock(poolDir string, fn func() error) error {
 	if err := os.MkdirAll(poolDir, 0755); err != nil {
 		return err
 	}
@@ -554,5 +542,8 @@ func withStateLock(poolDir string, fn func() error) error {
 	}
 	defer unlockFile(f)
 
+	if err := recoverQuarantinedEntries(poolDir); err != nil {
+		return err
+	}
 	return fn()
 }

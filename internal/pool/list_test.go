@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -101,9 +103,6 @@ func TestListDoesNotBlockAcquire(t *testing.T) {
 			t.Fatalf("inconsistent lease: %+v", wt)
 		}
 	}
-	if statuses[0].ChangedDuringScan {
-		t.Fatal("adding another slot incorrectly marked the unchanged snapshot slot")
-	}
 }
 
 func TestListSnapshotSurvivesReturnAndReacquire(t *testing.T) {
@@ -141,8 +140,8 @@ func TestListSnapshotSurvivesReturnAndReacquire(t *testing.T) {
 		t.Fatalf("expected a new lease on the returned slot: %+v", replacement.lease)
 	}
 	statuses := finish()
-	if len(statuses) != 1 || statuses[0].Status != StatusLeased || statuses[0].LeaseID != original.LeaseID || statuses[0].LeaseHolder != original.LeaseHolder || !statuses[0].LeasedAt.Equal(original.LeasedAt) || !statuses[0].ChangedDuringScan {
-		t.Fatalf("changed slot must retain the entire original lease and be marked: %+v", statuses)
+	if len(statuses) != 1 || statuses[0].Status != StatusLeased || statuses[0].LeaseID != original.LeaseID || statuses[0].LeaseHolder != original.LeaseHolder || !statuses[0].LeasedAt.Equal(original.LeasedAt) {
+		t.Fatalf("changed slot must retain the entire original lease: %+v", statuses)
 	}
 	current := entryFor(t, dir, original.Path)
 	if !current.Leased || current.LeaseID != replacement.lease.LeaseID || current.LeaseHolder != replacement.lease.LeaseHolder || !current.LeasedAt.Equal(replacement.lease.LeasedAt) {
@@ -151,8 +150,8 @@ func TestListSnapshotSurvivesReturnAndReacquire(t *testing.T) {
 	if _, err := AcquireLeaseInfo(repo, dir, 1, nil, "third"); err == nil {
 		t.Fatal("the replacement slot was handed out twice")
 	}
-	if err := ReleaseConditional(dir, original.Path, "", ReleasePreconditions{ExpectedLeaseID: &statuses[0].LeaseID}, nil); err == nil {
-		t.Fatal("a stale snapshot released the replacement lease")
+	if err := ReleaseConditional(dir, original.Path, "", ReleasePreconditions{ExpectedReservation: &statuses[0].Reservation}, nil); !errors.Is(err, ErrLeasePreconditionFailed) {
+		t.Fatalf("a stale snapshot released the replacement lease: %v", err)
 	}
 }
 
@@ -181,8 +180,8 @@ func TestListDoesNotBlockPrune(t *testing.T) {
 		t.Fatalf("prune did not remove the disposable slot: %+v", pruned.result)
 	}
 	statuses := finish()
-	if len(statuses) != 1 || statuses[0].Path != path || !statuses[0].ChangedDuringScan {
-		t.Fatalf("removed slot was not retained and marked in the snapshot: %+v", statuses)
+	if len(statuses) != 1 || statuses[0].Path != path {
+		t.Fatalf("removed slot was not retained in the snapshot: %+v", statuses)
 	}
 	state, err := ReadState(dir)
 	if err != nil {
@@ -193,32 +192,80 @@ func TestListDoesNotBlockPrune(t *testing.T) {
 	}
 }
 
-func TestListRecoveryDoesNotOverwriteConcurrentLease(t *testing.T) {
-	_, dir, path := recoveredFixture(t)
-	finish, resume := blockStatusScan(t, dir)
-	type outcome struct {
-		lease LeaseInfo
-		err   error
+func mutateEntry(t *testing.T, poolDir, path string, change func(*WorktreeEntry)) {
+	t.Helper()
+	state, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	done := make(chan outcome, 1)
-	go func() { lease, err := LeaseExisting(dir, "1", "replacement"); done <- outcome{lease, err} }()
-	var replacement outcome
-	select {
-	case replacement = <-done:
-	case <-time.After(10 * time.Second):
-		resume()
-		<-done
-		t.Fatal("lease waited for status's quarantined-entry process scan")
+	for i := range state.Worktrees {
+		if state.Worktrees[i].Path == path {
+			change(&state.Worktrees[i])
+			if err := WriteState(poolDir, state); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
 	}
-	if replacement.err != nil {
-		t.Fatal(replacement.err)
+	t.Fatalf("worktree %s missing from state %#v", path, state.Worktrees)
+}
+
+// A listing can be as old as its whole scan, so a release that acts on a row
+// must be refused once the slot's claim differs from the one the listing saw:
+// a plain get reserving an unowned slot, a different session owning it, and a
+// legacy lease with no ID being re-leased.
+func TestExpectedReservationRefusesAClaimMadeAfterTheListing(t *testing.T) {
+	repo, dir := setupLocalRepo(t)
+	paths := idleSlots(t, repo, dir, 3)
+	unowned, owned, legacy := paths[0], paths[1], paths[2]
+	mutateEntry(t, dir, owned, func(wt *WorktreeEntry) {
+		if err := reserveOwner(wt); err != nil {
+			t.Fatal(err)
+		}
+	})
+	mutateEntry(t, dir, legacy, func(wt *WorktreeEntry) {
+		wt.Leased, wt.LeaseID, wt.LeaseHolder, wt.LeasedAt = true, "", "legacy", time.Now()
+	})
+
+	statuses, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	statuses := finish()
-	if len(statuses) != 1 || statuses[0].LeaseHolder != RecoveredLeaseHolder || !statuses[0].ChangedDuringScan {
-		t.Fatalf("recovery must retain and mark the old quarantine snapshot: %+v", statuses)
+	observed := map[string]Reservation{}
+	for _, status := range statuses {
+		observed[status.Path] = status.Reservation
 	}
-	current := entryFor(t, dir, path)
-	if !current.Leased || current.LeaseID != replacement.lease.LeaseID || current.LeaseHolder != replacement.lease.LeaseHolder {
-		t.Fatalf("status's stale recovery cleared or mixed the replacement lease: %+v", current)
+	if len(observed) != 3 {
+		t.Fatalf("expected all three slots listed: %+v", statuses)
+	}
+	validate := func(path string) error {
+		r := observed[path]
+		return ValidateReleasePreconditions(dir, path, ReleasePreconditions{ExpectedReservation: &r}, nil)
+	}
+	for _, path := range paths {
+		if err := validate(path); err != nil {
+			t.Fatalf("the claim the listing saw on %s must still release: %v", path, err)
+		}
+	}
+
+	mutateEntry(t, dir, unowned, func(wt *WorktreeEntry) {
+		if err := reserveOwner(wt); err != nil {
+			t.Fatal(err)
+		}
+	})
+	mutateEntry(t, dir, owned, func(wt *WorktreeEntry) { wt.OwnerPID++; wt.OwnerStartedAt++ })
+	mutateEntry(t, dir, legacy, func(wt *WorktreeEntry) { wt.LeaseID = "re-leased" })
+	for name, path := range map[string]string{"plain get": unowned, "other session": owned, "re-lease": legacy} {
+		before := entryFor(t, dir, path)
+		if err := validate(path); !errors.Is(err, ErrLeasePreconditionFailed) {
+			t.Fatalf("%s: validate = %v, want a lease precondition failure", name, err)
+		}
+		r := observed[path]
+		if err := ReleaseConditional(dir, path, "", ReleasePreconditions{ExpectedReservation: &r}, nil); !errors.Is(err, ErrLeasePreconditionFailed) {
+			t.Fatalf("%s: release = %v, want a lease precondition failure", name, err)
+		}
+		if after := entryFor(t, dir, path); !reflect.DeepEqual(before, after) {
+			t.Fatalf("%s: a refused release changed the entry:\nbefore %+v\nafter  %+v", name, before, after)
+		}
 	}
 }

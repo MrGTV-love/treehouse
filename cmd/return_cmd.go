@@ -74,11 +74,10 @@ Holding leased and in-use slots in scope is deliberately wider than 'prune' and
 'destroy --all', which never touch a leased slot: --all exists to reclaim a
 whole pool. Each worktree is returned exactly as naming it would be, including
 the confirmation before uncommitted changes are discarded; declining one skips
-it and the rest still run. Each release is pinned to the lease the listing saw:
-a slot leased then is skipped unless that same lease is still on it, and a slot
-unleased then is skipped if it has been leased since. A slot handed to another
-plain 'treehouse get' carries no lease to compare, so it is returned like any
-other in-use slot. --all takes no path or name, and cannot be combined with the
+it and the rest still run. Each release is pinned to the reservation the listing
+saw: a slot is skipped unless the same lease, or the same absence of one, and the
+same 'treehouse get' session still hold it, so a slot leased, returned, or handed
+to another 'treehouse get' since the listing is left alone. --all takes no path or name, and cannot be combined with the
 --if-lease-* conditions, which target a single lease identity. A slot
 'treehouse status' reports as recovered is never returned by --all; check it
 and return it by name.`,
@@ -167,38 +166,30 @@ func releaseWorktree(target returnTarget, preconditions pool.ReleasePrecondition
 	})
 }
 
-// bulkReturnPreconditions carries the LEASE the `--all` listing observed into
-// the release of that slot. The two instants are separated by every earlier
+// bulkReturnPreconditions carries the RESERVATION the `--all` listing observed
+// into the release of that slot. The two instants are separated by the whole
+// listing scan, which runs without the state lock, and by every earlier
 // confirmation in the run, a far wider window than a named return has.
 //
-// The two observations are two DIFFERENT predicates, and each call below names
-// the one it means rather than encoding it in a value. A leased slot is pinned
-// to its lease ID: every acquisition mints a new one, so neither a takeover nor
-// a plain return in between can still match. The refusal reports only that,
-// never WHY the lease changed: the pool answers whether the identity still
-// holds, not who moved it. An unleased observation asks for RequireUnleased,
-// which refuses the slot once somebody has leased it.
+// A reservation is the durable lease (its ID, or none) plus the short-lived
+// owner a plain `treehouse get` takes. Every acquisition mints a new lease ID
+// and every plain `get` a new owner, so a takeover, a plain return, or a new
+// worker in between can no longer match; a leased slot with no ID (a state file
+// predating lease IDs) is pinned as leased-without-ID, so its re-lease or return
+// is caught too. The refusal reports only that the reservation changed, never
+// WHY: the pool answers whether the claim still holds, not who moved it.
 //
-// That is the whole guarantee, and it is bounded by what ReleasePreconditions
-// can express: a slot handed to another plain `treehouse get` is still
-// unleased, so its new owner reservation is NOT detected - consistent with
-// `--all` reclaiming in-use slots by design. A leased slot with no ID (a state
-// file predating lease IDs) offers nothing to compare, so its release carries
-// only the recovered-entry refusal below.
+// That is the whole guarantee: a slot whose processes changed without any
+// reservation changing is still reclaimed, which is what `--all` does to in-use
+// slots by design.
 //
 // Every bulk release also refuses an entry that remains recovered after the
 // automatic safety check, including one recovered after the listing (for
 // example, when a state key is invalidated mid-run). Such a slot needs a named
 // return after inspection.
 func bulkReturnPreconditions(wt pool.WorktreeStatus) pool.ReleasePreconditions {
-	if wt.Status == pool.StatusLeased {
-		if wt.LeaseID == "" {
-			return pool.ReleasePreconditions{RefuseRecovered: true}
-		}
-		expected := wt.LeaseID
-		return pool.ReleasePreconditions{ExpectedLeaseID: &expected, RefuseRecovered: true}
-	}
-	return pool.ReleasePreconditions{RequireUnleased: true, RefuseRecovered: true}
+	observed := wt.Reservation
+	return pool.ReleasePreconditions{ExpectedReservation: &observed, RefuseRecovered: true}
 }
 
 // returnableStatus reports whether `return --all` acts on a slot in this state.

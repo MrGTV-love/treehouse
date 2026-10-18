@@ -4624,13 +4624,12 @@ func captureStderr(t *testing.T, f func()) string {
 	return out
 }
 
-// TestReleasePreconditions_LeaseIdentityAndAbsenceAreSeparatePredicates pins the
-// split between "still exactly this acquisition" and "still nobody's". They are
-// opposite assertions, so neither an empty identity nor the two together can
-// describe a reachable worktree: both are refused as a CALL-SITE error, with a
-// sentinel a release classifier must never mistake for a lease state, and
-// nothing about the worktree changes.
-func TestReleasePreconditions_LeaseIdentityAndAbsenceAreSeparatePredicates(t *testing.T) {
+// TestReleasePreconditions_EmptyLeaseIdentityIsNotAbsenceOfALease pins that an
+// empty identity cannot stand in for "still nobody's": it describes no
+// reachable worktree, so it is refused as a CALL-SITE error, with a sentinel a
+// release classifier must never mistake for a lease state, and nothing about
+// the worktree changes. The absence of a lease is asserted by ExpectedReservation.
+func TestReleasePreconditions_EmptyLeaseIdentityIsNotAbsenceOfALease(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 	lease, err := AcquireLeaseInfo(repoDir, poolDir, 4, nil, "holder-A")
 	if err != nil {
@@ -4638,14 +4637,11 @@ func TestReleasePreconditions_LeaseIdentityAndAbsenceAreSeparatePredicates(t *te
 	}
 
 	empty := ""
-	holder := lease.LeaseHolder
 	refused := []struct {
 		name          string
 		preconditions ReleasePreconditions
 	}{
 		{"empty identity is not a lease", ReleasePreconditions{ExpectedLeaseID: &empty}},
-		{"identity and absence together", ReleasePreconditions{ExpectedLeaseID: &lease.LeaseID, RequireUnleased: true}},
-		{"holder and absence together", ReleasePreconditions{ExpectedLeaseHolder: &holder, RequireUnleased: true}},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4667,8 +4663,9 @@ func TestReleasePreconditions_LeaseIdentityAndAbsenceAreSeparatePredicates(t *te
 	}
 
 	// Each predicate then refuses exactly the state it is meant to refuse.
-	if err := ReleaseConditional(poolDir, lease.Path, "", ReleasePreconditions{RequireUnleased: true}, nil); !errors.Is(err, ErrLeasePreconditionFailed) {
-		t.Fatalf("RequireUnleased on a leased worktree = %v, want a lease precondition failure", err)
+	unleased := Reservation{}
+	if err := ReleaseConditional(poolDir, lease.Path, "", ReleasePreconditions{ExpectedReservation: &unleased}, nil); !errors.Is(err, ErrLeasePreconditionFailed) {
+		t.Fatalf("an unleased reservation on a leased worktree = %v, want a lease precondition failure", err)
 	}
 	stale := "not-the-current-identity"
 	if err := ReleaseConditional(poolDir, lease.Path, "", ReleasePreconditions{ExpectedLeaseID: &stale}, nil); !errors.Is(err, ErrLeasePreconditionFailed) {
@@ -4677,7 +4674,7 @@ func TestReleasePreconditions_LeaseIdentityAndAbsenceAreSeparatePredicates(t *te
 	if err := ReleaseConditional(poolDir, lease.Path, "", ReleasePreconditions{ExpectedLeaseID: &lease.LeaseID}, nil); err != nil {
 		t.Fatalf("the current identity must still release: %v", err)
 	}
-	if err := ReleaseConditional(poolDir, lease.Path, "", ReleasePreconditions{RequireUnleased: true}, nil); err != nil {
-		t.Fatalf("RequireUnleased on the now-parked worktree must pass: %v", err)
+	if err := ReleaseConditional(poolDir, lease.Path, "", ReleasePreconditions{ExpectedReservation: &unleased}, nil); err != nil {
+		t.Fatalf("an unleased reservation on the now-parked worktree must pass: %v", err)
 	}
 }

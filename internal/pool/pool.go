@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"time"
 
@@ -74,10 +73,29 @@ type WorktreeStatus struct {
 	// alone cannot answer that, because StatusHere hides whichever
 	// classification the slot would otherwise have carried.
 	HeldOnlyByCwd bool
-	// ChangedDuringScan means the persisted slot record changed or disappeared
-	// while List inspected the snapshot. Lease fields still describe the snapshot;
-	// process and VCS fields are observations made during the unlocked scan.
-	ChangedDuringScan bool
+	// Reservation is the persisted claim on the slot when List took its
+	// snapshot. A release pins to it with ReleasePreconditions.ExpectedReservation
+	// so it never acts on a slot somebody claimed after the listing.
+	Reservation Reservation
+}
+
+// Reservation is the persisted claim on one slot at one instant: its durable
+// lease and its short-lived owner. The owner pair identifies a process the way
+// ownerAlive does, because a PID alone can be reused by an unrelated process.
+type Reservation struct {
+	Leased         bool
+	LeaseID        string
+	OwnerPID       int32
+	OwnerStartedAt int64
+}
+
+func reservationOf(wt WorktreeEntry) Reservation {
+	return Reservation{
+		Leased:         wt.Leased,
+		LeaseID:        wt.LeaseID,
+		OwnerPID:       wt.OwnerPID,
+		OwnerStartedAt: wt.OwnerStartedAt,
+	}
 }
 
 // LeaseInfo is the stable machine-readable identity of one lease acquisition.
@@ -932,37 +950,37 @@ var ErrRecoveredEntry = errors.New("recovered entry")
 var ErrOwnerPreconditionFailed = errors.New("owner precondition failed")
 
 // ErrInvalidReleasePreconditions reports preconditions no worktree could ever
-// satisfy: an empty ExpectedLeaseID, or RequireUnleased asked for alongside a
-// lease identity or holder. It describes the CALL, not the worktree, so it is a
-// programming error to surface loudly rather than one of the states a release
-// classifies and skips.
+// satisfy: an empty ExpectedLeaseID. It describes the CALL, not the worktree, so
+// it is a programming error to surface loudly rather than one of the states a
+// release classifies and skips.
 var ErrInvalidReleasePreconditions = errors.New("invalid release preconditions")
 
 // ReleasePreconditions optionally constrain a release to the current lease.
 // Pointer fields distinguish an omitted condition from an expected empty value.
 //
-// The two things a caller can assert about a lease are separate fields, not two
-// readings of one value: "still exactly this acquisition" and "still nobody's"
-// are opposite predicates, and a single field carrying both would read
-// correctly and behave oppositely the day a caller passes an identity variable
-// that happens to be empty. They cannot be combined, and an empty
-// ExpectedLeaseID is a programming error rather than the other predicate in
-// disguise - both are rejected with ErrInvalidReleasePreconditions.
+// An empty ExpectedLeaseID is a programming error rather than a way to say "no
+// lease": it would read as "still nobody's" and behave oppositely the day a
+// caller passes an identity variable that happens to be empty. It is rejected
+// with ErrInvalidReleasePreconditions; ExpectedReservation is the field that can
+// assert the absence of a lease.
 type ReleasePreconditions struct {
 	// ExpectedLeaseID requires the worktree to still carry EXACTLY this lease
 	// identity, so a release that names one acquisition can never act on a
 	// later one. Nil omits the condition. The empty string is not an identity
-	// any acquisition can have; use RequireUnleased to assert the absence of a
-	// lease.
+	// any acquisition can have; use ExpectedReservation to assert the absence of
+	// a lease.
 	ExpectedLeaseID *string
 	// ExpectedLeaseHolder requires the current lease to carry this holder. Like
 	// ExpectedLeaseID it asserts that a lease EXISTS, so it refuses an unleased
 	// worktree.
 	ExpectedLeaseHolder *string
-	// RequireUnleased requires the worktree to still carry NO lease. It is what
-	// an observation of an unleased slot replays: a bulk release that set out
-	// to reclaim a slot nobody had leased must refuse it once somebody has.
-	RequireUnleased bool
+	// ExpectedReservation requires the worktree to still carry EXACTLY the
+	// lease and owner reservation a listing observed. A bulk release replays it,
+	// because the listing and the release are separated by the whole scan and by
+	// every earlier confirmation in the run: a slot leased, returned, or handed to
+	// a new plain `get` in between is somebody else's and must be left alone. The
+	// zero Reservation asserts the slot is still unleased and unowned.
+	ExpectedReservation *Reservation
 	// RequireOwnedByCaller limits the release to a worktree that still carries
 	// the calling process's own owner reservation, which is what an acquiring
 	// `treehouse get` holds until it returns the slot. Without it, a session
@@ -1121,11 +1139,8 @@ func releasableWorktree(state *State, worktreePath string, preconditions Release
 // check rejects preconditions that describe no reachable worktree state, before
 // any state is read and long before anything is released.
 func (p ReleasePreconditions) check() error {
-	if p.RequireUnleased && (p.ExpectedLeaseID != nil || p.ExpectedLeaseHolder != nil) {
-		return fmt.Errorf("%w: RequireUnleased asserts the worktree carries no lease and cannot be combined with an expected lease identity or holder", ErrInvalidReleasePreconditions)
-	}
 	if p.ExpectedLeaseID != nil && *p.ExpectedLeaseID == "" {
-		return fmt.Errorf("%w: the empty string is not a lease identity; use RequireUnleased to require that the worktree carries no lease", ErrInvalidReleasePreconditions)
+		return fmt.Errorf("%w: the empty string is not a lease identity; use ExpectedReservation to require that the worktree carries no lease", ErrInvalidReleasePreconditions)
 	}
 	return nil
 }
@@ -1142,11 +1157,8 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 	if preconditions.RefuseRecovered && wt.Leased && wt.LeaseHolder == RecoveredLeaseHolder {
 		return fmt.Errorf("%w: worktree %s was recovered and is only returned by name", ErrRecoveredEntry, wt.Path)
 	}
-	if preconditions.RequireUnleased {
-		if wt.Leased {
-			return fmt.Errorf("%w: worktree %s was observed unleased and is leased now", ErrLeasePreconditionFailed, wt.Path)
-		}
-		return nil
+	if preconditions.ExpectedReservation != nil && reservationOf(wt) != *preconditions.ExpectedReservation {
+		return fmt.Errorf("%w: worktree %s is no longer reserved as it was observed", ErrLeasePreconditionFailed, wt.Path)
 	}
 	if preconditions.ExpectedLeaseID == nil && preconditions.ExpectedLeaseHolder == nil {
 		return nil
@@ -1163,10 +1175,13 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 	return nil
 }
 
-// List reports a locked snapshot of pool membership and reservations, enriched
-// by process and VCS observations collected without the state lock. Records that
-// differ at the final atomic state read are marked ChangedDuringScan; their lease
-// identity, holder and timestamp still describe the original snapshot.
+// List returns the status of managed worktrees in poolDir as a point-in-time
+// snapshot. Membership and reservations are read, healed and persisted under the
+// state lock; the lock is then released before the per-slot process and VCS
+// scans, which can take minutes on a loaded host, so a slow List never blocks
+// get, return, or prune. A row can therefore be older than the state by the
+// length of the scan. A caller that acts on a row must pin the action to the
+// observed Reservation, as return --all does.
 // Leased worktrees are reported with StatusLeased and their optional holder.
 // An idle slot whose .git/.jj marker is gone is reported StatusDamaged: its
 // dirtiness is never read, because dispatch on a markerless path falls back to
@@ -1181,7 +1196,7 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 // which reads as a stale snapshot of real leftover processes.
 func List(poolDir string) ([]WorktreeStatus, error) {
 	var state State
-	err := withStateLock(poolDir, func() error {
+	err := WithStateLock(poolDir, func() error {
 		var err error
 		state, err = ReadState(poolDir)
 		if err != nil {
@@ -1192,13 +1207,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		if err != nil {
 			return err
 		}
-		if err := WriteState(poolDir, state); err != nil {
-			return err
-		}
-		// Reload the canonical serialized values (including recovered timestamps
-		// and authenticated inventory) used by the final change comparison.
-		state, err = ReadState(poolDir)
-		return err
+		return WriteState(poolDir, state)
 	})
 	if err != nil {
 		return nil, err
@@ -1206,7 +1215,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 
 	cwd, _ := os.Getwd()
 	var result []WorktreeStatus
-	for i, wt := range state.Worktrees {
+	for _, wt := range state.Worktrees {
 		if wt.Destroying {
 			continue
 		}
@@ -1221,13 +1230,6 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		// error is warned loudly on stderr (the diagnostic half), instead
 		// of silently presenting every slot as quiet.
 		procs, scanErr := findProcessesInWorktree(wt.Path)
-		if wt.Leased && wt.LeaseHolder == RecoveredLeaseHolder {
-			wt, err = recoverListedEntry(poolDir, wt, procs, scanErr)
-			if err != nil {
-				return nil, err
-			}
-			state.Worktrees[i] = wt
-		}
 		ws := WorktreeStatus{
 			Name:           wt.Name,
 			Path:           wt.Path,
@@ -1235,6 +1237,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 			Flavor:         vcs.WorktreeBackendName(wt.Path),
 			RecoveryReason: wt.RecoveryReason,
 			RecoveryBackup: recoveryBackup(poolDir, wt.Name),
+			Reservation:    reservationOf(wt),
 		}
 		if scanErr != nil {
 			fmt.Fprintf(os.Stderr, "treehouse: WARNING: could not read the process table to see what is running in %s (%v); it is reported %s with no processes.\n", wt.Path, scanErr, StatusUnverified)
@@ -1310,63 +1313,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		result = append(result, ws)
 	}
 
-	// Atomic state replacement makes this read safe without reacquiring the
-	// lock. Never write the snapshot back: get/return/prune may have changed
-	// membership or leases while the observations above were in flight.
-	latest, err := ReadState(poolDir)
-	if err != nil {
-		return nil, err
-	}
-	byName := make(map[string]*WorktreeEntry, len(latest.Worktrees))
-	for i := range latest.Worktrees {
-		wt := &latest.Worktrees[i]
-		byName[wt.Name] = wt
-	}
-	row := 0
-	for _, wt := range state.Worktrees {
-		if wt.Destroying {
-			continue
-		}
-		current, exists := byName[wt.Name]
-		result[row].ChangedDuringScan = !exists || !reflect.DeepEqual(&wt, current)
-		row++
-	}
 	return result, nil
-}
-
-// recoverListedEntry preserves status-triggered automatic recovery without a
-// locked process-table walk. The raw (not caller-filtered) scan was just taken
-// outside the lock. Only an unchanged quarantined record may use that evidence;
-// a return, re-lease, or removal wins and must never be overwritten. The remaining
-// filesystem checks and any backup moves still run under the mutation lock.
-func recoverListedEntry(poolDir string, snapshot WorktreeEntry, procs []process.ProcessInfo, scanErr error) (WorktreeEntry, error) {
-	err := withStateLock(poolDir, func() error {
-		current, err := ReadState(poolDir)
-		if err != nil {
-			return err
-		}
-		for i := range current.Worktrees {
-			wt := &current.Worktrees[i]
-			if wt.Name != snapshot.Name || !reflect.DeepEqual(*wt, snapshot) {
-				continue
-			}
-			reason := recoverSafeEntryWithScan(poolDir, wt, func(string) ([]process.ProcessInfo, error) {
-				return procs, scanErr
-			})
-			if reason == "" {
-				releaseEntry(wt)
-			} else {
-				wt.RecoveryReason = reason
-			}
-			if err := WriteState(poolDir, current); err != nil {
-				return err
-			}
-			snapshot = *wt
-			return nil
-		}
-		return nil
-	})
-	return snapshot, err
 }
 
 // FindByName returns the pool entry registered under name, or nil when this

@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1017,4 +1019,147 @@ func TestInNixStore(t *testing.T) {
 			t.Fatalf("InNixStore(%q) = true, want false for a link that resolves outside the store", link)
 		}
 	})
+}
+
+// upstreamReleaseRepo is the project this fork was taken from. A fork build
+// must never check it for updates or install anything from it.
+const upstreamReleaseRepo = "kunchenguid/treehouse"
+
+func TestDefaultReleaseSourceIsTheFork(t *testing.T) {
+	u, err := url.Parse(defaultGitHubAPIURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "api.github.com" {
+		t.Errorf("update check host = %q, want api.github.com", u.Host)
+	}
+	if want := "/repos/" + ReleaseRepo + "/releases/latest"; u.Path != want {
+		t.Errorf("update check path = %q, want %q", u.Path, want)
+	}
+	if strings.Contains(strings.ToLower(defaultGitHubAPIURL), upstreamReleaseRepo) {
+		t.Errorf("update check %q names upstream %s", defaultGitHubAPIURL, upstreamReleaseRepo)
+	}
+	if githubAPIURL != defaultGitHubAPIURL {
+		t.Errorf("githubAPIURL = %q, want the default %q", githubAPIURL, defaultGitHubAPIURL)
+	}
+}
+
+// releasesByRepo serves GitHub's /repos/<repo>/releases/latest for several
+// repositories at once and records which ones were asked, so a test can prove
+// which release source an update check really used.
+type releasesByRepo struct {
+	srv  *httptest.Server
+	mu   sync.Mutex
+	hits []string
+}
+
+func newReleasesByRepo(t *testing.T, tagByRepo map[string]string) *releasesByRepo {
+	t.Helper()
+	r := &releasesByRepo{}
+	mux := http.NewServeMux()
+	for repo, tag := range tagByRepo {
+		repo, tag := repo, tag
+		assetName := AssetNameForVersion(tag)
+		mux.HandleFunc("/repos/"+repo+"/releases/latest", func(w http.ResponseWriter, req *http.Request) {
+			r.mu.Lock()
+			r.hits = append(r.hits, repo)
+			r.mu.Unlock()
+			// Asset URLs follow GitHub's real shape, so a result names the
+			// repository its release belongs to.
+			base := "https://github.com/" + repo + "/releases/download/" + tag + "/"
+			json.NewEncoder(w).Encode(githubRelease{
+				TagName: tag,
+				Assets: []githubAsset{
+					{Name: assetName, BrowserDownloadURL: base + assetName},
+					{Name: "checksums.txt", BrowserDownloadURL: base + "checksums.txt"},
+				},
+			})
+		})
+	}
+	r.srv = httptest.NewServer(mux)
+	t.Cleanup(r.srv.Close)
+	return r
+}
+
+func (r *releasesByRepo) asked() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.hits...)
+}
+
+// useDefaultReleasePath points the update check at srv but keeps the path the
+// build's default release source names, so the repository the check really
+// asks for is observable.
+func useDefaultReleasePath(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	u, err := url.Parse(defaultGitHubAPIURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := githubAPIURL
+	githubAPIURL = srv.URL + u.Path
+	t.Cleanup(func() { githubAPIURL = orig })
+}
+
+func TestCheckLatestIgnoresAHigherUpstreamRelease(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", tmp)
+	}
+
+	releases := newReleasesByRepo(t, map[string]string{
+		upstreamReleaseRepo: "v99.0.0",
+		ReleaseRepo:         "v3.2.0",
+	})
+	useDefaultReleasePath(t, releases.srv)
+
+	result, err := CheckLatest("v3.2.0")
+	if err != nil {
+		t.Fatalf("CheckLatest: %v", err)
+	}
+	if result.UpdateAvailable {
+		t.Errorf("UpdateAvailable = true (latest %s): a fork build at its own latest must not be offered an upstream release", result.LatestVersion)
+	}
+	if result.LatestVersion != "v3.2.0" {
+		t.Errorf("LatestVersion = %q, want the fork's v3.2.0", result.LatestVersion)
+	}
+	if got := releases.asked(); len(got) != 1 || got[0] != ReleaseRepo {
+		t.Errorf("update check asked %v, want only %s", got, ReleaseRepo)
+	}
+	if strings.Contains(result.DownloadURL, upstreamReleaseRepo) || strings.Contains(result.ChecksumURL, upstreamReleaseRepo) {
+		t.Errorf("result points at upstream: %q, %q", result.DownloadURL, result.ChecksumURL)
+	}
+	if cached := ReadCache("v3.2.0"); cached == nil || cached.UpdateAvailable {
+		t.Errorf("cache = %+v, want the fork's latest with no update available", cached)
+	}
+}
+
+func TestCacheFromAnotherReleaseSourceIsIgnored(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", tmp)
+	}
+
+	// ~/.treehouse/update-check.json is shared by every treehouse build on the
+	// machine. These are the entries an upstream build, and a fork build from
+	// before the source was recorded, leave behind.
+	for name, body := range map[string]string{
+		"upstream build":       fmt.Sprintf(`{"checked_at":%q,"latest_version":"v9.9.9","source":%q}`, time.Now().Format(time.RFC3339), upstreamReleaseRepo),
+		"entry without source": fmt.Sprintf(`{"checked_at":%q,"latest_version":"v9.9.9"}`, time.Now().Format(time.RFC3339)),
+	} {
+		if err := os.MkdirAll(filepath.Dir(cachePath()), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cachePath(), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := ReadCache("v3.2.0"); got != nil {
+			t.Errorf("%s: ReadCache = %+v, want nil so no upstream notice is shown", name, got)
+		}
+		if !IsCacheStale("v3.2.0") {
+			t.Errorf("%s: cache should be stale so the fork's releases are checked", name)
+		}
+	}
 }

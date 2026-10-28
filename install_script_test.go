@@ -15,7 +15,7 @@ func TestInstallScriptLatestRedirect(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell installer")
 	}
-	const releaseURL = "https://github.com/kunchenguid/treehouse/releases/"
+	const releaseURL = "https://github.com/MrGTV-love/treehouse/releases/"
 	for _, tc := range []struct {
 		name, effectiveURL, version string
 		curlFailure                 bool
@@ -39,7 +39,7 @@ func TestInstallScriptLatestRedirect(t *testing.T) {
 				"uname": "#!/bin/sh\ncase \"$1\" in -s) echo Linux ;; -m) echo x86_64 ;; *) exit 99 ;; esac\n",
 				"curl": `#!/bin/sh
 printf '%s\n' "$*" >> "$CURL_LOG"
-if [ "$*" = '-fsSLI -o /dev/null -w %{url_effective} https://github.com/kunchenguid/treehouse/releases/latest' ]; then
+if [ "$*" = '-fsSLI -o /dev/null -w %{url_effective} https://github.com/MrGTV-love/treehouse/releases/latest' ]; then
   [ "$CURL_FAILURE" = false ] || exit 22
   printf '%s' "$EFFECTIVE_URL"
   exit 0

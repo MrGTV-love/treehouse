@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/kunchenguid/treehouse/v3/internal/updater"
 )
 
 type countingTransport struct{ requests int }
@@ -51,7 +53,7 @@ func writeUpdateCache(t *testing.T, home, latest string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"checked_at":"` + time.Now().Format(time.RFC3339) + `","latest_version":"` + latest + `"}`
+	body := `{"checked_at":"` + time.Now().Format(time.RFC3339) + `","latest_version":"` + latest + `","source":"` + updater.ReleaseRepo + `"}`
 	if err := os.WriteFile(filepath.Join(dir, "update-check.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

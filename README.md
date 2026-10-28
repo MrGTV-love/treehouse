@@ -173,6 +173,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 | `treehouse get`            | Acquire a worktree from the pool                     |
 | `treehouse get --lease`    | Durably lease a worktree without a subshell; print its path |
 | `treehouse lease <name>`   | Durably lease an existing pool worktree in place, without touching its files or git state |
+| `treehouse lease --path <path>` | Same, naming the worktree by its exact path; the pool is found from the path, so a slot number shared by two pools is no longer ambiguous |
 | `treehouse enter <name>`   | Open a subshell in an existing worktree by name (the number from `status`), even if it is in use; pool state is left untouched |
 | `treehouse status`         | Show pool status (highlights leased and current worktrees) |
 | `treehouse pool-dir`       | Print the pool directory `treehouse get` would allocate from here, without scanning or locking the pool |
@@ -198,6 +199,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 | `get`     | `--unique-leaf` | Name a newly created worktree directory `<repo>-<slot>` instead of `<repo>`, overriding `unique_leaf` in config |
 | `get`     | `--worktree-path` | Template for a newly created worktree's directory, overriding `worktree_path` in config |
 | `get`     | `--apfs-sharing` | `fresh` opts in to tracked-file sharing for new Git slots on macOS/APFS; `off` opts out (default) |
+| `lease`   | `--path` | Lease the worktree at this exact path instead of naming it; mutually exclusive with `<name>`. Refuses a path outside every pool, a path that is not a worktree root, and an already-leased worktree |
 | `lease`   | `--lease-holder` | Optional label recorded as the lease holder (defaults to `$TREEHOUSE_LEASE_HOLDER`) |
 | `lease`   | `--json` | Print `path`, `lease_id`, `lease_holder`, `leased_at`, and `base_branch` as JSON (`base_branch` is best-effort: empty when the slot records no explicit base and its own worktree cannot resolve a default) |
 | `enter`   | `--print-path` | Print only the worktree's absolute path to stdout instead of opening a subshell (for `cd "$(treehouse enter --print-path 1)"`) |

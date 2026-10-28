@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Features
+
+* **cmd:** add `treehouse pool-dir`, which prints the pool directory `treehouse get` would allocate from without scanning slots or taking the pool lock.
+
 ### Bug Fixes
 
 * **pool:** prevent duplicate pool records from filesystem path aliases while preserving live work (GRE-1933).

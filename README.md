@@ -175,6 +175,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 | `treehouse lease <name>`   | Durably lease an existing pool worktree in place, without touching its files or git state |
 | `treehouse enter <name>`   | Open a subshell in an existing worktree by name (the number from `status`), even if it is in use; pool state is left untouched |
 | `treehouse status`         | Show pool status (highlights leased and current worktrees) |
+| `treehouse pool-dir`       | Print the pool directory `treehouse get` would allocate from here, without scanning or locking the pool |
 | `treehouse return [path\|name]` | Release any lease and return a worktree only after verifying foreign processes stopped; the name is the number from `status` |
 | `treehouse return --all`   | Return every held worktree in the current repo pool |
 | `treehouse prune`          | Dry-run removal of stale idle worktrees in the current repo pool |
@@ -324,6 +325,17 @@ With `--no-fetch`, Treehouse resets or creates the worktree from existing local 
 `treehouse status --json` returns an array with `name`, `path`, `status`, `branch`, `detached`, `branch_error`, `recovery_reason`, `recovery_backup`, `flavor`, `lease_id`, `lease_holder`, `leased_at`, and `processes`. `recovery_reason` is set when an unsafe recovered lease remains quarantined. `recovery_backup` is the slot's recovery backup folder, set while that folder holds anything. `branch` names the checked-out branch of a git slot on a branch; it is empty for a detached HEAD, a jj slot, and a markerless (damaged) slot. `detached` is `true` only for a git slot on a detached HEAD (the state `treehouse get` leaves by default) and is omitted when false; `branch_error` is set when a slot's branch could not be read, so a read failure is never mistaken for a detached HEAD or an empty branch. `processes` is what `treehouse return` would terminate in that worktree, not every process whose working directory is inside it: the calling process and its ancestors are excluded, so running `status` from inside a pooled worktree reports what is resident in the slot instead of the shell you typed the command into. When the process table itself cannot be read, `status` is `unverified` and `processes` is empty: whether anything is running there is unknown, so the slot is not reported `available`, `dirty`, or `in-use`, and the error is printed as a warning on stderr. A lease, an owner reservation, or the slot you are standing in is still reported as such, because those facts do not depend on the scan. `flavor` is the backend the worktree's own marker identifies (`"git"` or `"jj"`) and is omitted when no marker is found. Non-leased entries use empty lease strings and a `null` timestamp. State files written before lease identities remain readable; their existing leases have an empty `lease_id` until released and acquired again.
 
 `treehouse status` takes its snapshot of pool membership and reservations under the pool lock, then releases the lock before it scans processes and inspects worktrees, so a slow scan never blocks `get`, `return`, or `prune`. A row is therefore a point-in-time snapshot taken without holding the lock, and it can be seconds to minutes old on a loaded host. `return --all` acts on rows, so it checks each slot again under the lock before it acts, as described below.
+
+### Finding the pool directory
+
+`treehouse pool-dir` prints the absolute pool directory that `treehouse get` would allocate from in the current repository, as one line on stdout:
+
+```bash
+$ treehouse pool-dir
+/Users/me/.treehouse/myrepo-a1b2c3
+```
+
+It resolves the directory through the same code as `get` and `status`, so `--root`, `TREEHOUSE_ROOT`, the project `treehouse.toml`, the user-level config, the default root, and the no-origin fallback all apply exactly as they do there. It only computes the path: it scans no slots, takes no pool or state lock, and writes nothing, so it does not create the directory or touch `.git/info/exclude`, and it returns at once even while `get`, `return`, or `status` holds the pool. Use it instead of `treehouse status --json` when you only need to know where the pool is. Outside a git or jj repository it exits nonzero, prints the same error as `status` on stderr, and prints nothing on stdout.
 
 Release a lease with `treehouse return <path>`, which terminates lingering processes and verifies that no foreign process remains before it resets the worktree, clears the lease, and returns the worktree to the pool.
 If process termination or that verification fails, the command exits nonzero and leaves the worktree and lease in place instead of recycling a slot that may still be in use.

@@ -38,7 +38,9 @@ so that multiple AI coding agents can work on the same repo in parallel.`,
 		if version == "dev" || os.Getenv("TREEHOUSE_NO_UPDATE_CHECK") == "1" {
 			return
 		}
-		if cmd.Name() == "update" {
+		// pool-dir promises to write nothing, and a stale cache would spawn a
+		// background check that does.
+		if cmd.Name() == "update" || cmd.Name() == "pool-dir" {
 			return
 		}
 

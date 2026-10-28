@@ -553,7 +553,7 @@ func poolDirForRepoRoot(repoRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to load config: %w", err)
 	}
-	return config.ResolvePoolDir(repoRoot, config.ResolveRoot(rootFlag, cfg))
+	return resolvePoolDir(repoRoot, cfg)
 }
 
 func resolveReturnPath(wtPath string, explicitPath bool) (returnTarget, error) {

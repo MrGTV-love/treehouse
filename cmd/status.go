@@ -53,7 +53,7 @@ var statusCmd = &cobra.Command{
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
-		poolDir, err := config.ResolvePoolDir(repoRoot, config.ResolveRoot(rootFlag, cfg))
+		poolDir, err := resolvePoolDir(repoRoot, cfg)
 		if err != nil {
 			return err
 		}

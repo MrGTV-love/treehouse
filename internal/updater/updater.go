@@ -22,8 +22,15 @@ import (
 	"github.com/kunchenguid/treehouse/v3/internal/vcs"
 )
 
+// ReleaseRepo is the only repository this build checks for updates and
+// downloads them from. This is a fork: it carries fixes the upstream project
+// does not, so a self-update from upstream's releases would silently drop
+// them. Every other place that names a release source (the installers, the
+// README install lines) must agree with it; a root-level test enforces that.
+const ReleaseRepo = "MrGTV-love/treehouse"
+
 const (
-	defaultGitHubAPIURL = "https://api.github.com/repos/kunchenguid/treehouse/releases/latest"
+	defaultGitHubAPIURL = "https://api.github.com/repos/" + ReleaseRepo + "/releases/latest"
 	cacheFileName       = "update-check.json"
 	checksumsFile       = "checksums.txt"
 	cacheTTL            = 24 * time.Hour
@@ -55,6 +62,11 @@ type CheckResult struct {
 type CacheEntry struct {
 	CheckedAt     time.Time `json:"checked_at"`
 	LatestVersion string    `json:"latest_version"`
+	// Source is the release repository LatestVersion came from. The file is
+	// shared with every treehouse build on the machine, so an entry written by
+	// a build that follows another repository (an upstream build, or an older
+	// fork build) says nothing about this build's releases and is ignored.
+	Source string `json:"source,omitempty"`
 }
 
 // githubRelease is the subset of the GitHub API response we need.
@@ -126,7 +138,7 @@ func ReadCache(currentVersion string) *CheckResult {
 		return nil
 	}
 
-	if entry.LatestVersion == "" {
+	if entry.LatestVersion == "" || entry.Source != ReleaseRepo {
 		return nil
 	}
 
@@ -152,7 +164,7 @@ func IsCacheStale(currentVersion string) bool {
 		return true
 	}
 
-	if time.Since(entry.CheckedAt) > cacheTTL {
+	if entry.Source != ReleaseRepo || time.Since(entry.CheckedAt) > cacheTTL {
 		return true
 	}
 
@@ -461,6 +473,7 @@ func cachePath() string {
 }
 
 func writeCache(entry CacheEntry) error {
+	entry.Source = ReleaseRepo
 	path := cachePath()
 	if path == "" {
 		return fmt.Errorf("cannot determine home directory")

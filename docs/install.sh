@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="kunchenguid/treehouse"
+REPO="MrGTV-love/treehouse"
 
 # Prefer ~/.local/bin if it exists and is in PATH (no sudo needed).
 # Fall back to /usr/local/bin otherwise.

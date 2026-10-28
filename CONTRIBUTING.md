@@ -5,7 +5,7 @@ Thanks for your interest in contributing!
 ## Getting Started
 
 ```sh
-git clone https://github.com/kunchenguid/treehouse.git
+git clone https://github.com/MrGTV-love/treehouse.git
 cd treehouse
 make build
 make test
@@ -37,12 +37,13 @@ curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/i
 no-mistakes doctor   # needs git + a supported agent runner + gh
 
 # no-mistakes opens PRs against your `origin` remote, so origin must point to
-# the parent (kunchenguid/treehouse). If you cloned the parent directly you're
-# already set; if you cloned your fork instead, reset origin first:
-#   git remote set-url origin https://github.com/kunchenguid/treehouse.git
-# Then point the gate at your fork via --fork-url. The gate pushes validated
-# branches to your fork while opening PRs against the parent (origin).
-no-mistakes init --fork-url https://github.com/<you>/treehouse.git
+# this fork (MrGTV-love/treehouse), never to upstream. If you cloned this fork
+# directly you're already set; otherwise reset origin first:
+#   git remote set-url origin https://github.com/MrGTV-love/treehouse.git
+no-mistakes init
+# Without push access to MrGTV-love/treehouse, add
+# --fork-url https://github.com/<you>/treehouse.git so the gate pushes
+# validated branches to your copy while opening PRs against origin.
 ```
 
 ### Raising a PR
@@ -58,13 +59,14 @@ no-mistakes axi run --intent "<what you set out to accomplish>"
 # until outcome: checks-passed
 ```
 
-The gate pushes your branch to your fork, opens (or updates) the PR against the parent
-repo, and writes the attestation into the PR body. Once the pipeline hits
+The gate pushes your branch (to your own copy when you set `--fork-url`), opens (or
+updates) the PR against origin (MrGTV-love/treehouse), and writes the attestation into
+the PR body. Once the pipeline hits
 `checks-passed`, the `PR must be raised via no-mistakes` check goes green on its own.
 
 ### Workflow file changes
 
-If your PR touches `.github/workflows/*.yml`, the push to your fork requires a git
+If your PR touches `.github/workflows/*.yml`, the gate's push requires a git
 credential with the `workflow` scope. GitHub rejects the push with
 `refusing to allow an OAuth App to create or update workflow ... without workflow scope`
 if the stored token lacks it. Fix it before pushing:
@@ -99,7 +101,7 @@ for the full walkthrough.
 
 ## Reporting Issues
 
-Open a [GitHub issue](https://github.com/kunchenguid/treehouse/issues) with steps to reproduce. Include your OS, architecture, and treehouse version (`treehouse --version`).
+Open a [GitHub issue](https://github.com/MrGTV-love/treehouse/issues) with steps to reproduce. Include your OS, architecture, and treehouse version (`treehouse --version`).
 
 ## License
 

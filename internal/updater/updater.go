@@ -22,8 +22,16 @@ import (
 	"github.com/kunchenguid/treehouse/v3/internal/vcs"
 )
 
+// ReleaseRepo is the only repository this build checks for updates and
+// downloads them from. This is a fork: it carries fixes the upstream project
+// does not, so a self-update from upstream's releases would silently drop
+// them. Every other place that names a release source (the installers, the
+// README install lines) must agree with it; a root-level test enforces that.
+const ReleaseRepo = "MrGTV-love/treehouse"
+
 const (
-	defaultGitHubAPIURL = "https://api.github.com/repos/kunchenguid/treehouse/releases/latest"
+	defaultGitHubAPIURL = "https://api.github.com/repos/" + ReleaseRepo + "/releases/latest"
+	releaseDownloadBase = "https://github.com/" + ReleaseRepo + "/releases/download/"
 	cacheFileName       = "update-check.json"
 	checksumsFile       = "checksums.txt"
 	cacheTTL            = 24 * time.Hour
@@ -42,6 +50,11 @@ var githubAPIURL = defaultGitHubAPIURL
 // Disabled in tests where httptest servers use plain HTTP.
 var enforceHTTPS = true
 
+// enforceReleaseSource controls whether asset URLs must point at ReleaseRepo's
+// own release downloads. Disabled in tests where httptest servers stand in for
+// GitHub.
+var enforceReleaseSource = true
+
 // CheckResult holds the outcome of a version check.
 type CheckResult struct {
 	CurrentVersion  string `json:"current_version"`
@@ -55,6 +68,11 @@ type CheckResult struct {
 type CacheEntry struct {
 	CheckedAt     time.Time `json:"checked_at"`
 	LatestVersion string    `json:"latest_version"`
+	// Source is the release repository LatestVersion came from. The file is
+	// shared with every treehouse build on the machine, so an entry written by
+	// a build that follows another repository (an upstream build, or an older
+	// fork build) says nothing about this build's releases and is ignored.
+	Source string `json:"source,omitempty"`
 }
 
 // githubRelease is the subset of the GitHub API response we need.
@@ -99,8 +117,14 @@ func CheckLatest(currentVersion string) (*CheckResult, error) {
 		UpdateAvailable: CompareVersions(release.TagName, currentVersion) > 0,
 	}
 
-	// Find download URL and checksum URL for this platform
+	// Find download URL and checksum URL for this platform. An asset that is
+	// not served from ReleaseRepo's own releases is never selected, so a
+	// response that points elsewhere yields no download rather than a foreign
+	// binary.
 	for _, a := range release.Assets {
+		if !isReleaseSourceURL(a.BrowserDownloadURL) {
+			continue
+		}
 		if matchesCurrentPlatformAsset(a.Name) {
 			result.DownloadURL = a.BrowserDownloadURL
 		}
@@ -126,7 +150,7 @@ func ReadCache(currentVersion string) *CheckResult {
 		return nil
 	}
 
-	if entry.LatestVersion == "" {
+	if entry.LatestVersion == "" || entry.Source != ReleaseRepo {
 		return nil
 	}
 
@@ -152,7 +176,7 @@ func IsCacheStale(currentVersion string) bool {
 		return true
 	}
 
-	if time.Since(entry.CheckedAt) > cacheTTL {
+	if entry.Source != ReleaseRepo || time.Since(entry.CheckedAt) > cacheTTL {
 		return true
 	}
 
@@ -321,6 +345,12 @@ func Apply(result *CheckResult) error {
 		return fmt.Errorf("no download URL for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
+	// Refuse any asset that is not one of ReleaseRepo's own release downloads,
+	// whatever produced the result.
+	if !isReleaseSourceURL(result.DownloadURL) || !isReleaseSourceURL(result.ChecksumURL) {
+		return fmt.Errorf("refusing to update: assets must be downloaded from %s", releaseDownloadBase)
+	}
+
 	// Enforce HTTPS on all download URLs to prevent MITM
 	if err := requireHTTPS(result.DownloadURL); err != nil {
 		return fmt.Errorf("download URL: %w", err)
@@ -460,7 +490,15 @@ func cachePath() string {
 	return filepath.Join(home, treehouseDir, cacheFileName)
 }
 
+// isReleaseSourceURL reports whether url is a download from ReleaseRepo's own
+// releases. An empty URL passes so a release that lacks an asset still
+// reports "no download URL" or "no checksums file" rather than a source error.
+func isReleaseSourceURL(url string) bool {
+	return !enforceReleaseSource || url == "" || strings.HasPrefix(url, releaseDownloadBase)
+}
+
 func writeCache(entry CacheEntry) error {
+	entry.Source = ReleaseRepo
 	path := cachePath()
 	if path == "" {
 		return fmt.Errorf("cannot determine home directory")

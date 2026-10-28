@@ -1,8 +1,8 @@
 <h1 align="center">treehouse</h1>
 
 <p align="center">
-  <a href="https://github.com/kunchenguid/treehouse/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/kunchenguid/treehouse/ci.yml?style=flat-square&label=CI" /></a>
-  <a href="https://github.com/kunchenguid/treehouse/actions/workflows/release.yml"><img alt="Release" src="https://img.shields.io/github/actions/workflow/status/kunchenguid/treehouse/release.yml?style=flat-square&label=Release" /></a>
+  <a href="https://github.com/MrGTV-love/treehouse/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/MrGTV-love/treehouse/ci.yml?style=flat-square&label=CI" /></a>
+  <a href="https://github.com/MrGTV-love/treehouse/actions/workflows/release.yml"><img alt="Release" src="https://img.shields.io/github/actions/workflow/status/MrGTV-love/treehouse/release.yml?style=flat-square&label=Release" /></a>
   <a href="#"><img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue?style=flat-square" /></a>
   <a href="https://x.com/kunchenguid"><img alt="X" src="https://img.shields.io/badge/X-@kunchenguid-black?style=flat-square" /></a>
   <a href="https://discord.gg/BW4aJuQhTf"><img alt="Discord" src="https://img.shields.io/discord/1439901831038763092?style=flat-square&label=discord" /></a>
@@ -15,7 +15,7 @@ Are you still only working on one task at a time? Are you manually juggling betw
 Or... are you starting a new worktree for every agent session, losing all your installed dependencies and build cache each time, and wondering why your agents are slow?
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kunchenguid/treehouse/main/demo.gif" alt="treehouse demo" width="800" />
+  <img src="https://raw.githubusercontent.com/MrGTV-love/treehouse/main/demo.gif" alt="treehouse demo" width="800" />
 </p>
 
 Treehouse helps you manage a pool of reusable, isolated worktrees so each of your agents gets its own environment instantly — no cloning, no conflicts, no coordination overhead.
@@ -44,53 +44,49 @@ $ exit                         # exit the subshell when you're done
 **macOS / Linux**
 
 ```sh
-curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/MrGTV-love/treehouse/main/docs/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://kunchenguid.github.io/treehouse/install.ps1 | iex
+irm https://raw.githubusercontent.com/MrGTV-love/treehouse/main/docs/install.ps1 | iex
 ```
 
 **Nix**
 
 ```sh
-nix run github:kunchenguid/treehouse
+nix run github:MrGTV-love/treehouse
 # or pin a specific release tag:
-nix run github:kunchenguid/treehouse/v2.3.0
+nix run github:MrGTV-love/treehouse/v2.3.0
 ```
 
 Install into your Nix profile:
 
 ```sh
-nix profile add github:kunchenguid/treehouse
+nix profile add github:MrGTV-love/treehouse
 ```
 
 Or add to your flake inputs:
 
 ```nix
 treehouse = {
-  url = "github:kunchenguid/treehouse";
+  url = "github:MrGTV-love/treehouse";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 ```
 
 The flake exposes `#default` and `#treehouse` package outputs, plus `apps` for `nix run`.
 
-**Go**
-
-```sh
-go install github.com/kunchenguid/treehouse/v3@latest
-```
-
 **From source**
 
 ```sh
-git clone https://github.com/kunchenguid/treehouse.git
+git clone https://github.com/MrGTV-love/treehouse.git
 cd treehouse
 make install
 ```
+
+This fork keeps upstream's Go module path, so `go install github.com/kunchenguid/treehouse/v3@latest` would build upstream, not this fork. Build from a clone as above.
 
 ## How It Works
 

@@ -58,7 +58,7 @@ irm https://raw.githubusercontent.com/MrGTV-love/treehouse/main/docs/install.ps1
 ```sh
 nix run github:MrGTV-love/treehouse
 # or pin a specific release tag:
-nix run github:MrGTV-love/treehouse/v2.3.0
+nix run github:MrGTV-love/treehouse/<release-tag>
 ```
 
 Install into your Nix profile:

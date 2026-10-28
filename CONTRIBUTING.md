@@ -59,13 +59,14 @@ no-mistakes axi run --intent "<what you set out to accomplish>"
 # until outcome: checks-passed
 ```
 
-The gate pushes your branch to your fork, opens (or updates) the PR against the parent
-repo, and writes the attestation into the PR body. Once the pipeline hits
+The gate pushes your branch (to your own copy when you set `--fork-url`), opens (or
+updates) the PR against origin (MrGTV-love/treehouse), and writes the attestation into
+the PR body. Once the pipeline hits
 `checks-passed`, the `PR must be raised via no-mistakes` check goes green on its own.
 
 ### Workflow file changes
 
-If your PR touches `.github/workflows/*.yml`, the push to your fork requires a git
+If your PR touches `.github/workflows/*.yml`, the gate's push requires a git
 credential with the `workflow` scope. GitHub rejects the push with
 `refusing to allow an OAuth App to create or update workflow ... without workflow scope`
 if the stored token lacks it. Fix it before pushing:

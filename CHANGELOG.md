@@ -5,6 +5,7 @@
 ### Features
 
 * **cmd:** add `treehouse pool-dir`, which prints the pool directory `treehouse get` would allocate from without scanning slots or taking the pool lock.
+* **cmd:** add `treehouse lease --path <path>`, which leases a pool worktree by its exact path and finds its pool from that path, so a slot number shared by two pools is no longer ambiguous.
 
 ### Bug Fixes
 

@@ -149,7 +149,7 @@ func getRunE(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--branch is only supported by the git backend")
 	}
 
-	poolDir, err := config.ResolvePoolDir(repoRoot, config.ResolveRoot(rootFlag, cfg))
+	poolDir, err := resolvePoolDir(repoRoot, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to resolve pool directory: %w", err)
 	}

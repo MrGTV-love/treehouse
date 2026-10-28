@@ -2,7 +2,7 @@
 , buildGoModule
 , git
 , python3
-, version ? "3.1.2" # x-release-please-version
+, version ? "3.1.7" # x-release-please-version
 }:
 
 buildGoModule {
@@ -40,7 +40,6 @@ buildGoModule {
     mainProgram = "treehouse";
     platforms = [
       "aarch64-darwin"
-      "x86_64-darwin"
       "aarch64-linux"
       "x86_64-linux"
     ];

@@ -38,9 +38,9 @@ func TestReleaseSourceAgreesEverywhere(t *testing.T) {
 		t.Errorf("docs/install.ps1 $repo = %v, want %q", powershell, updater.ReleaseRepo)
 	}
 
-	// Everything a reader can paste to install or run a build, or that names
-	// the project's home, must point at the fork.
-	for _, path := range []string{"README.md", "package.nix", "flake.nix", "default.nix"} {
+	// Everything a reader can paste to install, run or contribute to a build,
+	// or that names the project's home, must point at the fork.
+	for _, path := range []string{"README.md", "CONTRIBUTING.md", "package.nix", "flake.nix", "default.nix"} {
 		for n, line := range strings.Split(readRepoFile(t, path), "\n") {
 			if !strings.Contains(line, upstreamRepo) {
 				continue

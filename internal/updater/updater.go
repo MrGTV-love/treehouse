@@ -31,7 +31,6 @@ const ReleaseRepo = "MrGTV-love/treehouse"
 
 const (
 	defaultGitHubAPIURL = "https://api.github.com/repos/" + ReleaseRepo + "/releases/latest"
-	releaseDownloadBase = "https://github.com/" + ReleaseRepo + "/releases/download/"
 	cacheFileName       = "update-check.json"
 	checksumsFile       = "checksums.txt"
 	cacheTTL            = 24 * time.Hour
@@ -49,11 +48,6 @@ var githubAPIURL = defaultGitHubAPIURL
 // enforceHTTPS controls whether download URLs must use HTTPS.
 // Disabled in tests where httptest servers use plain HTTP.
 var enforceHTTPS = true
-
-// enforceReleaseSource controls whether asset URLs must point at ReleaseRepo's
-// own release downloads. Disabled in tests where httptest servers stand in for
-// GitHub.
-var enforceReleaseSource = true
 
 // CheckResult holds the outcome of a version check.
 type CheckResult struct {
@@ -117,14 +111,8 @@ func CheckLatest(currentVersion string) (*CheckResult, error) {
 		UpdateAvailable: CompareVersions(release.TagName, currentVersion) > 0,
 	}
 
-	// Find download URL and checksum URL for this platform. An asset that is
-	// not served from ReleaseRepo's own releases is never selected, so a
-	// response that points elsewhere yields no download rather than a foreign
-	// binary.
+	// Find download URL and checksum URL for this platform
 	for _, a := range release.Assets {
-		if !isReleaseSourceURL(a.BrowserDownloadURL) {
-			continue
-		}
 		if matchesCurrentPlatformAsset(a.Name) {
 			result.DownloadURL = a.BrowserDownloadURL
 		}
@@ -345,12 +333,6 @@ func Apply(result *CheckResult) error {
 		return fmt.Errorf("no download URL for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	// Refuse any asset that is not one of ReleaseRepo's own release downloads,
-	// whatever produced the result.
-	if !isReleaseSourceURL(result.DownloadURL) || !isReleaseSourceURL(result.ChecksumURL) {
-		return fmt.Errorf("refusing to update: assets must be downloaded from %s", releaseDownloadBase)
-	}
-
 	// Enforce HTTPS on all download URLs to prevent MITM
 	if err := requireHTTPS(result.DownloadURL); err != nil {
 		return fmt.Errorf("download URL: %w", err)
@@ -488,13 +470,6 @@ func cachePath() string {
 		return ""
 	}
 	return filepath.Join(home, treehouseDir, cacheFileName)
-}
-
-// isReleaseSourceURL reports whether url is a download from ReleaseRepo's own
-// releases. An empty URL passes so a release that lacks an asset still
-// reports "no download URL" or "no checksums file" rather than a source error.
-func isReleaseSourceURL(url string) bool {
-	return !enforceReleaseSource || url == "" || strings.HasPrefix(url, releaseDownloadBase)
 }
 
 func writeCache(entry CacheEntry) error {

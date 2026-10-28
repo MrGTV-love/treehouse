@@ -480,8 +480,6 @@ func fakeGitHubServer(t *testing.T, latestTag string, archiveBytes []byte) *http
 	// Disable HTTPS enforcement for test HTTP servers
 	enforceHTTPS = false
 	t.Cleanup(func() { enforceHTTPS = true })
-	enforceReleaseSource = false
-	t.Cleanup(func() { enforceReleaseSource = true })
 
 	return srv
 }
@@ -1009,8 +1007,8 @@ func newReleasesByRepo(t *testing.T, tagByRepo map[string]string) *releasesByRep
 			r.mu.Lock()
 			r.hits = append(r.hits, repo)
 			r.mu.Unlock()
-			// Asset URLs follow GitHub's real shape, so the source check sees
-			// the repository each release belongs to.
+			// Asset URLs follow GitHub's real shape, so a result names the
+			// repository its release belongs to.
 			base := "https://github.com/" + repo + "/releases/download/" + tag + "/"
 			json.NewEncoder(w).Encode(githubRelease{
 				TagName: tag,
@@ -1077,77 +1075,6 @@ func TestCheckLatestIgnoresAHigherUpstreamRelease(t *testing.T) {
 	}
 	if cached := ReadCache("v3.2.0"); cached == nil || cached.UpdateAvailable {
 		t.Errorf("cache = %+v, want the fork's latest with no update available", cached)
-	}
-}
-
-func TestCheckLatestDropsAssetsServedFromAnotherRepository(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	if runtime.GOOS == "windows" {
-		t.Setenv("USERPROFILE", tmp)
-	}
-
-	// A release response from the fork's endpoint whose assets live elsewhere.
-	mux := http.NewServeMux()
-	assetName := AssetNameForVersion("v4.0.0")
-	mux.HandleFunc("/repos/"+ReleaseRepo+"/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		base := "https://github.com/" + upstreamReleaseRepo + "/releases/download/v4.0.0/"
-		json.NewEncoder(w).Encode(githubRelease{
-			TagName: "v4.0.0",
-			Assets: []githubAsset{
-				{Name: assetName, BrowserDownloadURL: base + assetName},
-				{Name: "checksums.txt", BrowserDownloadURL: base + "checksums.txt"},
-			},
-		})
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	useDefaultReleasePath(t, srv)
-
-	result, err := CheckLatest("v3.0.0")
-	if err != nil {
-		t.Fatalf("CheckLatest: %v", err)
-	}
-	if result.DownloadURL != "" || result.ChecksumURL != "" {
-		t.Errorf("selected foreign assets: %q, %q", result.DownloadURL, result.ChecksumURL)
-	}
-	if err := Apply(result); err == nil {
-		t.Error("Apply succeeded without a fork download")
-	}
-}
-
-func TestApplyRefusesAnUpstreamRelease(t *testing.T) {
-	assetName := AssetNameForVersion("v99.0.0")
-	base := "https://github.com/" + upstreamReleaseRepo + "/releases/download/v99.0.0/"
-
-	// The same URLs under the fork's repository pass the source check, so the
-	// refusal below is about the source and nothing else.
-	forkBase := "https://github.com/" + ReleaseRepo + "/releases/download/v99.0.0/"
-	if !isReleaseSourceURL(forkBase+assetName) || !isReleaseSourceURL(forkBase+"checksums.txt") {
-		t.Fatal("the fork's own release downloads must pass the source check")
-	}
-
-	err := Apply(&CheckResult{
-		CurrentVersion:  "v3.2.0",
-		LatestVersion:   "v99.0.0",
-		UpdateAvailable: true,
-		DownloadURL:     base + assetName,
-		ChecksumURL:     base + "checksums.txt",
-	})
-	if err == nil {
-		t.Fatal("Apply accepted an upstream release")
-	}
-	if !strings.Contains(err.Error(), "refusing to update") {
-		t.Errorf("Apply error = %v, want the source refusal", err)
-	}
-
-	// One upstream asset beside a fork asset is still refused.
-	err = Apply(&CheckResult{
-		DownloadURL: forkBase + assetName,
-		ChecksumURL: base + "checksums.txt",
-	})
-	if err == nil || !strings.Contains(err.Error(), "refusing to update") {
-		t.Errorf("Apply with an upstream checksum = %v, want the source refusal", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package gitvcs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -396,6 +397,24 @@ func TestRemoveLandedWorktreeHoldsReftableHeadThroughRemoval(t *testing.T) {
 	head, err := runGit(wtPath, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatalf("resolve HEAD: %v", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		called := false
+		err := RemoveLandedWorktree(repoDir, wtPath, nil, func() error {
+			called = true
+			return nil
+		})
+		if !errors.Is(err, ErrWorktreeNotDisposable) {
+			t.Fatalf("expected Windows to refuse reftable reclamation as not disposable, got %v", err)
+		}
+		if called {
+			t.Fatal("expected the refusal before removal checks run")
+		}
+		if got, err := runGit(wtPath, "rev-parse", "HEAD"); err != nil || got != head {
+			t.Fatalf("expected the refused worktree kept at %s, got %q (%v)", head, got, err)
+		}
+		return
 	}
 
 	var concurrentErr error

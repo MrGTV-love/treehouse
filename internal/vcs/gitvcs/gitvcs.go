@@ -804,6 +804,12 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, b
 	if err != nil {
 		return err
 	}
+	if reftable && runtime.GOOS == "windows" {
+		// The held transaction keeps the worktree's reftable lock open, and
+		// Windows cannot delete an open file. Releasing it first would let a
+		// commit land before removal, so refuse before touching the slot.
+		return fmt.Errorf("cannot hold a reftable worktree HEAD through removal on Windows")
+	}
 	if reftable {
 		update, err := prepareHeadUpdate(worktreePath, head, head)
 		if err != nil {

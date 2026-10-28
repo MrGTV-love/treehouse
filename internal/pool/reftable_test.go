@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -101,6 +103,22 @@ func TestAcquire_ReftableForeignSlotIsReclaimed(t *testing.T) {
 	}
 	if err := Release(poolDir, path); err != nil {
 		t.Fatal(err)
+	}
+
+	if runtime.GOOS == "windows" {
+		before, err := ReadState(poolDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := Acquire(caller, poolDir, 1, nil); err == nil {
+			t.Fatalf("expected Windows to skip the reftable foreign slot, got %s", got)
+		}
+		assertSlotOnCommit(t, path, gitOut(t, foreign, "rev-parse", "HEAD"))
+		after, err := ReadState(poolDir)
+		if err != nil || !reflect.DeepEqual(before.Worktrees, after.Worktrees) {
+			t.Fatalf("skipped reclamation changed state: %#v (%v)", after, err)
+		}
+		return
 	}
 
 	got, err := Acquire(caller, poolDir, 1, nil)

@@ -796,26 +796,42 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, b
 	if err != nil {
 		return err
 	}
-	lockPath := headPath + ".lock"
-	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+	head, err := worktreeHead(worktreePath)
 	if err != nil {
-		return fmt.Errorf("cannot lock worktree HEAD: %w", err)
-	}
-	// Close before removal: Windows cannot remove an open lock file.
-	if err := lock.Close(); err != nil {
-		_ = os.Remove(lockPath)
 		return err
 	}
-	defer os.Remove(lockPath)
+	reftable, err := usesReftable(worktreePath)
+	if err != nil {
+		return err
+	}
+	var update *headUpdate
+	if reftable {
+		update, err = prepareHeadUpdate(worktreePath, head, head)
+		if err != nil {
+			return fmt.Errorf("cannot lock worktree HEAD: %w", err)
+		}
+		defer update.abort()
+	} else {
+		lockPath := headPath + ".lock"
+		lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+		if err != nil {
+			return fmt.Errorf("cannot lock worktree HEAD: %w", err)
+		}
+		// Close before removal: Windows cannot remove an open lock file.
+		if err := lock.Close(); err != nil {
+			_ = os.Remove(lockPath)
+			return err
+		}
+		defer os.Remove(lockPath)
+		if current, err := worktreeHead(worktreePath); err != nil || current != head {
+			return fmt.Errorf("worktree HEAD changed before it was locked")
+		}
+	}
 	gitDir := filepath.Dir(headPath)
 	if err := requireNoWorktreeOperation(gitDir); err != nil {
 		return err
 	}
 	if err := requireCleanRemovalAllowed(worktreePath, gitDir, seededPaths); err != nil {
-		return err
-	}
-	head, err := worktreeHead(worktreePath)
-	if err != nil {
 		return err
 	}
 
@@ -856,6 +872,11 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, b
 	current.Close()
 	// Release directory handles before Git removes the tree on Windows.
 	root.Close()
+	if update != nil && runtime.GOOS == "windows" {
+		// Windows cannot remove the tree while the transaction's git process
+		// works in it and holds its lock file open.
+		update.abort()
+	}
 	removing = true
 	return RemoveCleanWorktree(repoRoot, worktreePath)
 }

@@ -383,6 +383,43 @@ func TestPreparedHeadUpdateRefusesConcurrentCommitsUntilCommitted(t *testing.T) 
 	}
 }
 
+func TestRemoveLandedWorktreeHoldsReftableHeadThroughRemoval(t *testing.T) {
+	base := t.TempDir()
+	repoDir := filepath.Join(base, "repo")
+	remoteDir := filepath.Join(base, "remote.git")
+	wtPath := filepath.Join(base, "worktree")
+	initRepoWithFormat(t, repoDir, refFormatInitFlag(t, "reftable"))
+	mustGit(t, "", "init", "--bare", remoteDir)
+	mustGit(t, repoDir, "remote", "add", "origin", remoteDir)
+	mustGit(t, repoDir, "push", "origin", "main")
+	mustGit(t, repoDir, "worktree", "add", "--detach", wtPath, "main")
+	head, err := runGit(wtPath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("resolve HEAD: %v", err)
+	}
+
+	var concurrentErr error
+	err = RemoveLandedWorktree(repoDir, wtPath, nil, func() error {
+		_, concurrentErr = runGit(wtPath, "commit", "--allow-empty", "-m", "unlanded")
+		return nil
+	})
+	if concurrentErr == nil {
+		t.Fatal("expected a commit to be refused while reclamation holds HEAD")
+	}
+	if err != nil {
+		t.Fatalf("RemoveLandedWorktree: %v", err)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the landed worktree removed: %v", err)
+	}
+	if list, _ := runGit(repoDir, "worktree", "list", "--porcelain"); strings.Contains(list, wtPath) {
+		t.Fatalf("expected the worktree unregistered, got %q", list)
+	}
+	if got, _ := runGit(repoDir, "rev-parse", "main"); got != head {
+		t.Fatalf("main = %s, want it left at %s", got, head)
+	}
+}
+
 // A git older than 2.27 has no update-ref transaction verbs, and until 2.34 the
 // protocol could deadlock; a files-storage reset must not depend on it.
 func TestResetWorktreeToRefOnFilesStorageNeedsNoUpdateRefTransaction(t *testing.T) {

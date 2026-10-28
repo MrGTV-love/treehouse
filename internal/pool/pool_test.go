@@ -23,10 +23,10 @@ import (
 
 // setupSharedClonePool builds two same-named clones of one origin. Keep real
 // pool resolution in the fixture: both clones must share one pool.
-func setupSharedClonePool(t *testing.T) (cloneA, cloneB, poolDir string) {
+func setupSharedClonePool(t *testing.T, initFlags ...string) (cloneA, cloneB, poolDir string) {
 	t.Helper()
 	t.Setenv("TREEHOUSE_VCS", "git")
-	cloneA, _ = setupRepo(t)
+	cloneA, _ = setupRepo(t, initFlags...)
 	base := filepath.Dir(cloneA)
 	cloneB = filepath.Join(base, "other", filepath.Base(cloneA))
 	runGit(t, "", "clone", filepath.Join(base, "remote.git"), cloneB)

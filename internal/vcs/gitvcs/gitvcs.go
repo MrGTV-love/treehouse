@@ -804,9 +804,8 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, b
 	if err != nil {
 		return err
 	}
-	var update *headUpdate
 	if reftable {
-		update, err = prepareHeadUpdate(worktreePath, head, head)
+		update, err := prepareHeadUpdate(worktreePath, head, head)
 		if err != nil {
 			return fmt.Errorf("cannot lock worktree HEAD: %w", err)
 		}
@@ -872,11 +871,6 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, b
 	current.Close()
 	// Release directory handles before Git removes the tree on Windows.
 	root.Close()
-	if update != nil && runtime.GOOS == "windows" {
-		// Windows cannot remove the tree while the transaction's git process
-		// works in it and holds its lock file open.
-		update.abort()
-	}
 	removing = true
 	return RemoveCleanWorktree(repoRoot, worktreePath)
 }
@@ -1143,9 +1137,18 @@ type headUpdate struct {
 }
 
 func prepareHeadUpdate(worktreePath, newHead, oldHead string) (*headUpdate, error) {
+	dirs, err := runGit(worktreePath, "rev-parse", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return nil, err
+	}
+	gitDir, commonDir, ok := strings.Cut(dirs, "\n")
+	if !ok {
+		return nil, fmt.Errorf("cannot resolve git directories of %s", worktreePath)
+	}
 	// Hooks stay off: a reference-transaction hook runs in the worktree at prepare and could dirty the slot being reset.
 	u := &headUpdate{cmd: exec.Command("git", "-c", "core.hooksPath="+os.DevNull, "update-ref", "--stdin")}
-	u.cmd.Dir = worktreePath
+	u.cmd.Dir = filepath.Clean(filepath.FromSlash(strings.TrimSpace(commonDir)))
+	u.cmd.Env = append(os.Environ(), "GIT_DIR="+filepath.Clean(filepath.FromSlash(strings.TrimSpace(gitDir))))
 	u.cmd.Stderr = &u.stderr
 	stdin, err := u.cmd.StdinPipe()
 	if err != nil {

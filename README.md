@@ -558,7 +558,8 @@ foreign Git slot, then creates a fresh caller-owned slot, keeping the total
 unchanged. In-use,
 leased, dirty, damaged and unlanded slots are never candidates, nor are slots
 with a merge, rebase, cherry-pick, revert, bisect or sequenced Git operation in
-progress, even if the index and checkout are clean. A failed process, ownership,
+progress, even if the index and checkout are clean. On Windows, slots in a
+clone that uses Git's reftable ref storage are never candidates either. A failed process, ownership,
 operation-state or remote-landing check means leave the slot alone. A local
 base branch or stale remote-tracking ref is not sufficient deletion evidence.
 If no foreign slot qualifies, or the pool is already above the effective cap,

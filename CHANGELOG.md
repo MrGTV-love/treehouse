@@ -11,6 +11,43 @@
 
 * **pool:** prevent duplicate pool records from filesystem path aliases while preserving live work (GRE-1933).
 
+## [3.1.7](https://github.com/kunchenguid/treehouse/compare/v3.1.6...v3.1.7) (2026-10-26)
+
+
+### Bug Fixes
+
+* **installer:** resolve latest release without GitHub API ([#197](https://github.com/kunchenguid/treehouse/issues/197)) ([7372295](https://github.com/kunchenguid/treehouse/commit/73722955948dd402e0245b65dd9e5418b7970112))
+* **pool:** stop get from deregistering live slots it cannot see ([#198](https://github.com/kunchenguid/treehouse/issues/198)) ([4acb9e4](https://github.com/kunchenguid/treehouse/commit/4acb9e4bc1d78d9aeb69358cd5ff7d1b375a3a1f)), closes [#194](https://github.com/kunchenguid/treehouse/issues/194)
+
+## [3.1.6](https://github.com/kunchenguid/treehouse/compare/v3.1.5...v3.1.6) (2026-10-24)
+
+
+### Bug Fixes
+
+* **vcs:** move HEAD through a git transaction on reftable repositories ([#175](https://github.com/kunchenguid/treehouse/issues/175)) ([f389758](https://github.com/kunchenguid/treehouse/commit/f389758894dc2480801f3151ac272e8a3b7920e1)), closes [#174](https://github.com/kunchenguid/treehouse/issues/174)
+
+## [3.1.5](https://github.com/kunchenguid/treehouse/compare/v3.1.4...v3.1.5) (2026-10-20)
+
+
+### Bug Fixes
+
+* **pool:** reclaim empty leftover slot directories on get ([#186](https://github.com/kunchenguid/treehouse/issues/186)) ([03c12c2](https://github.com/kunchenguid/treehouse/commit/03c12c2847f2fa347e98e0a2e382fbde40a60da0))
+
+## [3.1.4](https://github.com/kunchenguid/treehouse/compare/v3.1.3...v3.1.4) (2026-10-15)
+
+
+### Bug Fixes
+
+* **nix:** drop x86_64-darwin and update flake.lock ([#182](https://github.com/kunchenguid/treehouse/issues/182)) ([2a93409](https://github.com/kunchenguid/treehouse/commit/2a934095cc791845f4b689ce9a5379df6d20df39))
+* **update:** refuse self-update and silence the notice in the Nix store ([#180](https://github.com/kunchenguid/treehouse/issues/180)) ([93a18da](https://github.com/kunchenguid/treehouse/commit/93a18dabcf5ad46bf243492912865d65ef0977dd))
+
+## [3.1.3](https://github.com/kunchenguid/treehouse/compare/v3.1.2...v3.1.3) (2026-10-12)
+
+
+### Bug Fixes
+
+* **vcs:** pin submodule.recurse=false in git runners ([#177](https://github.com/kunchenguid/treehouse/issues/177)) ([d40678e](https://github.com/kunchenguid/treehouse/commit/d40678e3b88ac638c4c05ccdfd96082c1aa1648a))
+
 ## [3.1.2](https://github.com/kunchenguid/treehouse/compare/v3.1.1...v3.1.2) (2026-10-02)
 
 

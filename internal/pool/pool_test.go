@@ -23,10 +23,10 @@ import (
 
 // setupSharedClonePool builds two same-named clones of one origin. Keep real
 // pool resolution in the fixture: both clones must share one pool.
-func setupSharedClonePool(t *testing.T) (cloneA, cloneB, poolDir string) {
+func setupSharedClonePool(t *testing.T, initFlags ...string) (cloneA, cloneB, poolDir string) {
 	t.Helper()
 	t.Setenv("TREEHOUSE_VCS", "git")
-	cloneA, _ = setupRepo(t)
+	cloneA, _ = setupRepo(t, initFlags...)
 	base := filepath.Dir(cloneA)
 	cloneB = filepath.Join(base, "other", filepath.Base(cloneA))
 	runGit(t, "", "clone", filepath.Join(base, "remote.git"), cloneB)
@@ -293,7 +293,7 @@ func TestRelease_CloneIdentityExistingState(t *testing.T) {
 	}
 }
 
-func setupRepo(t *testing.T) (repoDir, poolDir string) {
+func setupRepo(t *testing.T, initFlags ...string) (repoDir, poolDir string) {
 	t.Helper()
 	base := t.TempDir()
 	base, err := filepath.EvalSymlinks(base)
@@ -305,8 +305,8 @@ func setupRepo(t *testing.T) (repoDir, poolDir string) {
 	repoDir = filepath.Join(base, "myrepo")
 	poolDir = filepath.Join(base, "pool")
 
-	runGit(t, "", "init", "--bare", "--initial-branch=main", bareDir)
-	runGit(t, "", "init", "--initial-branch=main", repoDir)
+	runGit(t, "", append(append([]string{"init", "--bare", "--initial-branch=main"}, initFlags...), bareDir)...)
+	runGit(t, "", append(append([]string{"init", "--initial-branch=main"}, initFlags...), repoDir)...)
 	runGit(t, repoDir, "config", "user.email", "test@test.com")
 	runGit(t, repoDir, "config", "user.name", "Test")
 	runGit(t, repoDir, "remote", "add", "origin", bareDir)

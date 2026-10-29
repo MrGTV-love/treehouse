@@ -31,16 +31,18 @@ func readRepoFile(t *testing.T, path string) string {
 }
 
 // assertFetchesOnlyFromReleaseRepo fails unless every URL an installer
-// fetched is ReleaseRepo's releases API or one of its release downloads, and
-// the installer did both.
+// fetched is ReleaseRepo's latest-release lookup (its releases API, or the
+// /releases/latest redirect docs/install.sh resolves the tag from) or one of its
+// release downloads, and the installer did both.
 func assertFetchesOnlyFromReleaseRepo(t *testing.T, installer, fetchLog string) {
 	t.Helper()
 	api := "https://api.github.com/repos/" + updater.ReleaseRepo + "/releases/"
+	latest := "https://github.com/" + updater.ReleaseRepo + "/releases/latest"
 	download := "https://github.com/" + updater.ReleaseRepo + "/releases/download/" + stubTag + "/"
 	var sawAPI, sawDownload bool
 	for _, url := range strings.Fields(readRepoFile(t, fetchLog)) {
 		switch {
-		case strings.HasPrefix(url, api):
+		case strings.HasPrefix(url, api), url == latest:
 			sawAPI = true
 		case strings.HasPrefix(url, download):
 			sawDownload = true
@@ -90,6 +92,9 @@ while [ $# -gt 0 ]; do
   shift
 done
 echo "$url" >> "$FETCH_LOG"
+case "$url" in
+  */releases/latest) printf '%s' "${url%/latest}/tag/`+stubTag+`"; exit 0 ;;
+esac
 if [ -n "$out" ]; then : > "$out"; else echo '  "tag_name": "`+stubTag+`",'; fi`)
 	writeStub(t, stubs, "tar", `dir=
 while [ $# -gt 0 ]; do

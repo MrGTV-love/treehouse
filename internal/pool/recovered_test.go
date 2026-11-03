@@ -4,12 +4,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/treehouse/v3/internal/process"
 )
+
+// A recovered entry is a persistent quarantine: no command frees it, moves its
+// contents, or clears its lease as a side effect of another command. These
+// tests pin that, and the one way out: a return that names the slot.
 
 func recoveredFixture(t *testing.T) (string, string, string) {
 	t.Helper()
@@ -19,104 +22,220 @@ func recoveredFixture(t *testing.T) (string, string, string) {
 	return repo, poolDir, path
 }
 
-func TestRecoveredAutoFreeGates(t *testing.T) {
-	t.Run("clean base head frees for good", func(t *testing.T) {
-		_, poolDir, path := recoveredFixture(t)
-		for range 2 {
-			if st := statusOf(t, poolDir, path); st.Status != StatusAvailable || st.LeaseHolder != "" || st.RecoveryReason != "" {
-				t.Fatalf("status = %+v", st)
-			}
-		}
-		if wt := entryFor(t, poolDir, path); wt.Leased || !wt.SeedInventoryKnown {
-			t.Fatalf("freed entry reads back as %#v", wt)
-		}
-	})
-	t.Run("caller's own shell in the slot remains leased", func(t *testing.T) {
-		_, poolDir, path := recoveredFixture(t)
-		oldScan, oldFilter := findProcessesInWorktree, dropProtectedProcesses
-		findProcessesInWorktree = func(string) ([]process.ProcessInfo, error) {
-			return []process.ProcessInfo{{PID: 42, Name: "zsh"}}, nil
-		}
-		dropProtectedProcesses = func([]process.ProcessInfo) ([]process.ProcessInfo, error) { return nil, nil }
-		t.Cleanup(func() { findProcessesInWorktree, dropProtectedProcesses = oldScan, oldFilter })
-		st := statusOf(t, poolDir, path)
-		if st.Status != StatusLeased || !strings.Contains(st.RecoveryReason, "process is using") {
-			t.Fatalf("status = %+v", st)
-		}
-	})
-	t.Run("tracked changes remain leased", func(t *testing.T) {
-		_, poolDir, path := recoveredFixture(t)
-		if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("changed\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		st := statusOf(t, poolDir, path)
-		if st.Status != StatusLeased || !strings.Contains(st.RecoveryReason, "tracked changes") {
-			t.Fatalf("status = %+v", st)
-		}
-	})
-	for _, flag := range []string{"--skip-worktree", "--assume-unchanged"} {
-		t.Run("tracked edit hidden by "+flag+" remains leased", func(t *testing.T) {
-			_, poolDir, path := recoveredFixture(t)
-			runGit(t, path, "update-index", flag, "README.md")
-			file := filepath.Join(path, "README.md")
-			if err := os.WriteFile(file, []byte("hidden edit\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			st := statusOf(t, poolDir, path)
-			if st.Status != StatusLeased || !strings.Contains(st.RecoveryReason, "skip-worktree or assume-unchanged") {
-				t.Fatalf("status = %+v", st)
-			}
-			assertFileContents(t, file, "hidden edit\n")
-		})
+// quarantine marks the named idle slots as recovered, the way ReadState does
+// for an entry whose seed inventory fails to authenticate, and leaves every
+// other entry validly signed and idle.
+func quarantine(t *testing.T, poolDir string, names ...string) {
+	t.Helper()
+	state, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Run("unpushed head remains leased", func(t *testing.T) {
-		_, poolDir, path := recoveredFixture(t)
-		if err := os.WriteFile(filepath.Join(path, "new.txt"), []byte("commit\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		for _, args := range [][]string{{"add", "new.txt"}, {"commit", "-m", "unpushed"}} {
-			cmd := exec.Command("git", args...)
-			cmd.Dir = path
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("git %v: %v %s", args, err, out)
+	for i := range state.Worktrees {
+		wt := &state.Worktrees[i]
+		for _, name := range names {
+			if wt.Name == name {
+				wt.Leased, wt.LeaseHolder = true, RecoveredLeaseHolder
+				setSeedInventory(wt, nil, false)
 			}
 		}
-		st := statusOf(t, poolDir, path)
-		if st.Status != StatusLeased || !strings.Contains(st.RecoveryReason, "not contained") {
-			t.Fatalf("status = %+v", st)
-		}
-	})
-	t.Run("untracked contents are retained in backup then freed", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("untracked backup is not supported on Windows")
-		}
-		_, poolDir, path := recoveredFixture(t)
-		file := filepath.Join(path, "scratch", "notes.txt")
-		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(file, []byte("keep me\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		st := statusOf(t, poolDir, path)
-		if st.Status != StatusAvailable {
-			t.Fatalf("status = %+v", st)
-		}
-		if _, err := os.Stat(file); !os.IsNotExist(err) {
-			t.Fatalf("source untracked file remains; err=%v", err)
-		}
-		matches, err := filepath.Glob(filepath.Join(filepath.Dir(poolDir), "treehouse-recovered-backup-*", "scratch", "notes.txt"))
-		if err != nil || len(matches) != 1 {
-			t.Fatalf("backup matches %v, err %v", matches, err)
-		}
-		got, err := os.ReadFile(matches[0])
-		if err != nil || string(got) != "keep me\n" {
-			t.Fatalf("backup content %q, err %v", got, err)
-		}
-	})
+	}
+	if err := WriteState(poolDir, state); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func TestRecoveredAutoFreeOnReturnOfSibling(t *testing.T) {
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func backupFolders(t *testing.T, poolDir string) []string {
+	t.Helper()
+	dirs, err := filepath.Glob(filepath.Join(filepath.Dir(poolDir), "treehouse-recovered-backup-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dirs
+}
+
+func commitInSlot(t *testing.T, path, file string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(path, file), []byte("commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", file}, {"commit", "-m", "unlanded " + file}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+}
+
+// stillQuarantined fails unless the entry is exactly as writeRawState left it.
+func stillQuarantined(t *testing.T, poolDir, path string) {
+	t.Helper()
+	wt := entryFor(t, poolDir, path)
+	if !wt.Leased || wt.LeaseHolder != RecoveredLeaseHolder || wt.SeedInventoryKnown || wt.LeaseID != "" {
+		t.Fatalf("recovered entry changed: %#v", wt)
+	}
+}
+
+func TestWithStateLockRunsNoRecovery(t *testing.T) {
+	_, poolDir, path := recoveredFixture(t)
+	file := filepath.Join(path, "scratch", "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(stateFilePath(poolDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := WithStateLock(poolDir, func() error { called = true; return nil }); err != nil || !called {
+		t.Fatalf("callback called = %v, err = %v", called, err)
+	}
+	after, err := os.ReadFile(stateFilePath(poolDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("WithStateLock rewrote the state file:\nbefore: %s\nafter:  %s", before, after)
+	}
+	assertFileContents(t, file, "keep me\n")
+	if dirs := backupFolders(t, poolDir); len(dirs) != 0 {
+		t.Fatalf("backup folders created: %v", dirs)
+	}
+}
+
+// TestRecoveredLeaseSurvivesEveryCommand runs every command that takes the
+// state lock, in a fresh pool for each, against a recovered entry whose root is
+// in each condition the old sweep used to judge: clean and landed (which it
+// freed), tracked-dirty, unlanded, with untracked files, and with a nested
+// repository. The entry, its files and the pool's parent directory must be
+// exactly as they were.
+func TestRecoveredLeaseSurvivesEveryCommand(t *testing.T) {
+	conditions := map[string]func(t *testing.T, path string) (file, want string){
+		"clean and landed": func(t *testing.T, path string) (string, string) { return "README.md", "hi\n" },
+		"tracked-dirty": func(t *testing.T, path string) (string, string) {
+			if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("changed\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return "README.md", "changed\n"
+		},
+		"unlanded head": func(t *testing.T, path string) (string, string) {
+			commitInSlot(t, path, "new.txt")
+			return "new.txt", "commit\n"
+		},
+		"untracked files": func(t *testing.T, path string) (string, string) {
+			if err := os.MkdirAll(filepath.Join(path, "scratch"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "scratch", "notes.txt"), []byte("keep\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join("scratch", "notes.txt"), "keep\n"
+		},
+		"nested repository with an unlanded commit": func(t *testing.T, path string) (string, string) {
+			nested := filepath.Join(path, ".claude", "worktrees", "live")
+			runGit(t, "", "clone", "-q", "--no-hardlinks", path, nested)
+			runGit(t, nested, "config", "user.email", "test@test.com")
+			runGit(t, nested, "config", "user.name", "Test")
+			commitInSlot(t, nested, "owned.txt")
+			return filepath.Join(".claude", "worktrees", "live", "owned.txt"), "commit\n"
+		},
+	}
+	commands := map[string]func(t *testing.T, repo, poolDir, recovered, free string){
+		"status": func(t *testing.T, repo, poolDir, recovered, free string) {
+			if _, err := List(poolDir); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"lease of the entry itself is refused": func(t *testing.T, repo, poolDir, recovered, free string) {
+			if _, err := LeaseExisting(poolDir, "1", "someone"); err == nil || !strings.Contains(err.Error(), "already leased") {
+				t.Fatalf("LeaseExisting = %v, want already leased", err)
+			}
+		},
+		"lease of a free sibling": func(t *testing.T, repo, poolDir, recovered, free string) {
+			if _, err := LeaseExisting(poolDir, "2", "someone"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"get takes the free sibling": func(t *testing.T, repo, poolDir, recovered, free string) {
+			got, err := AcquireLease(repo, poolDir, 2, nil, "new-task")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if samePath(got, recovered) {
+				t.Fatalf("get returned the recovered slot %s", got)
+			}
+		},
+		"failed conditional return of a sibling": func(t *testing.T, repo, poolDir, recovered, free string) {
+			wrong := "not-the-holder"
+			err := ReleaseConditional(poolDir, free, "", ReleasePreconditions{ExpectedLeaseHolder: &wrong}, nil)
+			if err == nil {
+				t.Fatal("conditional return with a wrong holder succeeded")
+			}
+		},
+		"failed conditional return of the entry itself": func(t *testing.T, repo, poolDir, recovered, free string) {
+			wrong := "not-the-holder"
+			if err := ReleaseConditional(poolDir, recovered, "", ReleasePreconditions{ExpectedLeaseHolder: &wrong}, nil); err == nil {
+				t.Fatal("conditional return with a wrong holder succeeded")
+			}
+		},
+	}
+	for cname, setup := range conditions {
+		for aname, act := range commands {
+			t.Run(cname+"/"+aname, func(t *testing.T) {
+				repo, poolDir := setupLocalRepo(t)
+				paths := idleSlots(t, repo, poolDir, 2)
+				recovered := paths[0]
+				quarantine(t, poolDir, "1")
+				file, want := setup(t, recovered)
+				act(t, repo, poolDir, recovered, paths[1])
+				stillQuarantined(t, poolDir, recovered)
+				assertFileContents(t, filepath.Join(recovered, file), want)
+				if dirs := backupFolders(t, poolDir); len(dirs) != 0 {
+					t.Fatalf("backup folders created: %v", dirs)
+				}
+			})
+		}
+	}
+}
+
+func TestRecoveredLeaseSurvivesWhateverProcessState(t *testing.T) {
+	for name, procs := range map[string][]process.ProcessInfo{
+		"no process":   nil,
+		"live process": {{PID: 42, Name: "zsh"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, poolDir, path := recoveredFixture(t)
+			oldScan, oldFilter := findProcessesInWorktree, dropProtectedProcesses
+			findProcessesInWorktree = func(string) ([]process.ProcessInfo, error) { return procs, nil }
+			dropProtectedProcesses = func(p []process.ProcessInfo) ([]process.ProcessInfo, error) { return p, nil }
+			t.Cleanup(func() { findProcessesInWorktree, dropProtectedProcesses = oldScan, oldFilter })
+			for range 2 {
+				if st := statusOf(t, poolDir, path); st.Status != StatusLeased || st.LeaseHolder != RecoveredLeaseHolder {
+					t.Fatalf("status = %+v", st)
+				}
+			}
+			stillQuarantined(t, poolDir, path)
+		})
+	}
+}
+
+// Returning a sibling used to free every recovered entry that looked safe.
+func TestReturnOfSiblingLeavesRecoveredEntryQuarantined(t *testing.T) {
 	repo, poolDir := setupLocalRepo(t)
 	paths := idleSlots(t, repo, poolDir, 2)
 	writeRawState(t, poolDir, State{Version: stateVersion, Worktrees: []WorktreeEntry{
@@ -126,20 +245,90 @@ func TestRecoveredAutoFreeOnReturnOfSibling(t *testing.T) {
 	if err := Release(poolDir, paths[1]); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range paths {
-		if wt := entryFor(t, poolDir, path); wt.Leased {
-			t.Fatalf("%s still leased after returning its sibling: %#v", path, wt)
+	if wt := entryFor(t, poolDir, paths[1]); wt.Leased {
+		t.Fatalf("returned slot still leased: %#v", wt)
+	}
+	stillQuarantined(t, poolDir, paths[0])
+}
+
+func TestAcquireSkipsRecoveredEntry(t *testing.T) {
+	t.Run("a free slot is chosen, and only it is reset", func(t *testing.T) {
+		repo, poolDir := setupLocalRepo(t)
+		paths := idleSlots(t, repo, poolDir, 2)
+		quarantine(t, poolDir, "1")
+		dirty := filepath.Join(paths[0], "README.md")
+		if err := os.WriteFile(dirty, []byte("recovered work\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
+		// Advance main so the reset of the candidate is observable.
+		runGit(t, repo, "commit", "--allow-empty", "-m", "advance main")
+		tip := gitOutput(t, repo, "rev-parse", "main")
+		got, err := AcquireLease(repo, poolDir, 2, nil, "new-task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !samePath(got, paths[1]) {
+			t.Fatalf("get returned %s, want the free slot %s", got, paths[1])
+		}
+		assertFileContents(t, dirty, "recovered work\n")
+		if head := gitOutput(t, paths[1], "rev-parse", "HEAD"); head != tip {
+			t.Fatalf("the candidate is at %s, want it reset to main at %s", head, tip)
+		}
+		stillQuarantined(t, poolDir, paths[0])
+	})
+	t.Run("at capacity it reports exhaustion and frees nothing", func(t *testing.T) {
+		repo, poolDir, path := recoveredFixture(t)
+		file := filepath.Join(path, "scratch", "notes.txt")
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("keep\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := AcquireLease(repo, poolDir, 1, nil, "new-task")
+		if err == nil || !strings.Contains(err.Error(), "max_trees = 1") {
+			t.Fatalf("get = %v, want a capacity error", err)
+		}
+		stillQuarantined(t, poolDir, path)
+		assertFileContents(t, file, "keep\n")
+		if dirs := backupFolders(t, poolDir); len(dirs) != 0 {
+			t.Fatalf("backup folders created: %v", dirs)
+		}
+	})
+}
+
+// The way out of the quarantine is a return that names the slot. It must leave
+// the entry trusted: the next state read must not quarantine it again, and the
+// slot must be allocatable.
+func TestNamedReturnReleasesRecoveredEntryForReuse(t *testing.T) {
+	repo, poolDir, path := recoveredFixture(t)
+	holder := RecoveredLeaseHolder
+	if err := ReleaseConditional(poolDir, path, "", ReleasePreconditions{ExpectedLeaseHolder: &holder}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if st := statusOf(t, poolDir, path); st.Status != StatusAvailable || st.LeaseHolder != "" || st.RecoveryReason != "" {
+			t.Fatalf("returned slot reads %+v", st)
+		}
+	}
+	if wt := entryFor(t, poolDir, path); wt.Leased || !wt.SeedInventoryKnown {
+		t.Fatalf("returned entry reads back as %#v", wt)
+	}
+	got, err := AcquireLease(repo, poolDir, 1, nil, "next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, path) {
+		t.Fatalf("get returned %s, want the returned slot %s", got, path)
 	}
 }
 
 func TestRecoveryReasonClearedByNamedReturn(t *testing.T) {
-	_, poolDir, path := recoveredFixture(t)
-	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("changed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if st := statusOf(t, poolDir, path); st.RecoveryReason == "" {
-		t.Fatalf("quarantined slot has no reason: %+v", st)
+	repo, poolDir := setupLocalRepo(t)
+	path := idleSlots(t, repo, poolDir, 1)[0]
+	writeRawState(t, poolDir, State{Version: stateVersion, Worktrees: []WorktreeEntry{{Name: "1", Path: path, Leased: true, LeaseHolder: RecoveredLeaseHolder, RecoveryReason: "a reason an earlier version recorded"}}})
+	if st := statusOf(t, poolDir, path); st.RecoveryReason != "a reason an earlier version recorded" {
+		t.Fatalf("status = %+v", st)
 	}
 	if err := Release(poolDir, path); err != nil {
 		t.Fatal(err)
@@ -149,225 +338,46 @@ func TestRecoveryReasonClearedByNamedReturn(t *testing.T) {
 	}
 }
 
-func TestDamagedRecoveredEntryExplainsReason(t *testing.T) {
+func TestStatusExplainsPersistentQuarantine(t *testing.T) {
+	_, poolDir, path := recoveredFixture(t)
+	st := statusOf(t, poolDir, path)
+	if st.Status != StatusLeased || st.RecoveryReason != recoveredQuarantineReason {
+		t.Fatalf("status = %+v", st)
+	}
+	if wt := entryFor(t, poolDir, path); wt.RecoveryReason != "" {
+		t.Fatalf("status persisted a reason: %#v", wt)
+	}
+}
+
+func TestDamagedRecoveredEntryStaysQuarantined(t *testing.T) {
 	repo, poolDir := setupLocalRepo(t)
 	path := idleSlots(t, repo, poolDir, 1)[0]
 	writeRawState(t, poolDir, State{Version: stateVersion, Worktrees: []WorktreeEntry{{Name: "1", Path: path, Leased: true, LeaseHolder: RecoveredLeaseHolder, RecoveryError: "marker loop"}}})
 	st := statusOf(t, poolDir, path)
-	if st.Status != StatusDamaged || st.LeaseHolder != RecoveredLeaseHolder || !strings.Contains(st.RecoveryReason, "marker could not be read") {
+	if st.Status != StatusDamaged || st.LeaseHolder != RecoveredLeaseHolder || st.BranchErr != "marker loop" {
 		t.Fatalf("status = %+v", st)
 	}
 }
 
-func TestRecoveredSubmoduleChangesRemainLeased(t *testing.T) {
-	for name, tc := range map[string]struct {
-		hide   []string
-		reason string
-	}{
-		"ignored by submodule config": {reason: "tracked changes"},
-		"hidden by skip-worktree":     {hide: []string{"update-index", "--skip-worktree", "f.txt"}, reason: "skip-worktree or assume-unchanged"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			repo, poolDir := setupLocalRepo(t)
-			sub := filepath.Join(filepath.Dir(repo), "sub")
-			runGit(t, "", "init", "--initial-branch=main", sub)
-			runGit(t, sub, "config", "user.email", "test@test.com")
-			runGit(t, sub, "config", "user.name", "Test")
-			if err := os.WriteFile(filepath.Join(sub, "f.txt"), []byte("sub\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			runGit(t, sub, "add", ".")
-			runGit(t, sub, "commit", "-m", "sub")
-			runGit(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", sub, "sub")
-			runGit(t, repo, "config", "-f", ".gitmodules", "submodule.sub.ignore", "all")
-			runGit(t, repo, "add", ".gitmodules")
-			runGit(t, repo, "commit", "-m", "add ignored submodule")
-
-			path := idleSlots(t, repo, poolDir, 1)[0]
-			runGit(t, path, "-c", "protocol.file.allow=always", "submodule", "update", "--init")
-			if tc.hide != nil {
-				runGit(t, filepath.Join(path, "sub"), tc.hide...)
-			}
-			file := filepath.Join(path, "sub", "f.txt")
-			if err := os.WriteFile(file, []byte("edited\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			writeRawState(t, poolDir, State{Version: stateVersion, Worktrees: []WorktreeEntry{{Name: "1", Path: path, Leased: true, LeaseHolder: RecoveredLeaseHolder}}})
-			st := statusOf(t, poolDir, path)
-			if st.Status != StatusLeased || !strings.Contains(st.RecoveryReason, tc.reason) {
-				t.Fatalf("status = %+v", st)
-			}
-			assertFileContents(t, file, "edited\n")
-		})
-	}
-}
-
-func TestRecoveredSubmoduleUntrackedStaysLeased(t *testing.T) {
-	repo, poolDir := setupLocalRepo(t)
-	sub := filepath.Join(filepath.Dir(repo), "sub")
-	runGit(t, "", "init", "--initial-branch=main", sub)
-	runGit(t, sub, "config", "user.email", "test@test.com")
-	runGit(t, sub, "config", "user.name", "Test")
-	if err := os.WriteFile(filepath.Join(sub, "f.txt"), []byte("sub\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, sub, "add", ".")
-	runGit(t, sub, "commit", "-m", "sub")
-	runGit(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", sub, "sub")
-	runGit(t, repo, "commit", "-m", "add submodule")
-	path := idleSlots(t, repo, poolDir, 1)[0]
-	runGit(t, path, "-c", "protocol.file.allow=always", "submodule", "update", "--init")
-	file := filepath.Join(path, "sub", "scratch.txt")
-	if err := os.WriteFile(file, []byte("keep\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeRawState(t, poolDir, State{Version: stateVersion, Worktrees: []WorktreeEntry{{Name: "1", Path: path, Leased: true, LeaseHolder: RecoveredLeaseHolder}}})
-	st := statusOf(t, poolDir, path)
-	if st.Status != StatusLeased || !strings.Contains(st.RecoveryReason, "submodule sub") || !strings.Contains(st.RecoveryReason, "untracked") {
-		t.Fatalf("status = %+v", st)
-	}
-	assertFileContents(t, file, "keep\n")
-	if st.RecoveryBackup != "" {
-		t.Fatalf("submodule contents were backed up: %+v", st)
-	}
-}
-
-func TestBackupMoveNoReplacePreservesBothFiles(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("recovery backup is unsupported on Windows")
-	}
-	dir := t.TempDir()
-	src, dst := filepath.Join(dir, "source"), filepath.Join(dir, "destination")
-	if err := os.WriteFile(src, []byte("original\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(dst, []byte("racer\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := moveNoReplace(src, dst); !os.IsExist(err) {
-		t.Fatalf("occupied destination: %v", err)
-	}
-	assertFileContents(t, src, "original\n")
-	assertFileContents(t, dst, "racer\n")
-	if err := moveNoReplace(src, dst+".1"); err != nil {
-		t.Fatal(err)
-	}
-	assertFileContents(t, dst+".1", "original\n")
-	assertFileContents(t, dst, "racer\n")
-	if _, err := os.Lstat(src); !os.IsNotExist(err) {
-		t.Fatalf("source still present: %v", err)
-	}
-}
-
-func TestRecoveredPartialBackupRetriesIntoSameBackup(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs a directory whose entries cannot be renamed")
-	}
+// Backup folders an earlier version made are still reported, never created or
+// written by this one.
+func TestStatusReportsBackupFolderOfEarlierVersion(t *testing.T) {
 	_, poolDir, path := recoveredFixture(t)
-	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("first\n"), 0o644); err != nil {
+	backup := recoveryBackupDir(poolDir, "1")
+	if st := statusOf(t, poolDir, path); st.RecoveryBackup != "" {
+		t.Fatalf("status reports a backup that does not exist: %+v", st)
+	}
+	if err := os.Mkdir(backup, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	locked := filepath.Join(path, "locked")
-	if err := os.Mkdir(locked, 0o755); err != nil {
+	if st := statusOf(t, poolDir, path); st.RecoveryBackup != "" {
+		t.Fatalf("status reports an empty backup folder: %+v", st)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "notes.txt"), []byte("kept\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(locked, "b.txt"), []byte("stuck\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if st := statusOf(t, poolDir, path); st.RecoveryBackup != backup {
+		t.Fatalf("status = %+v, want backup %s", st, backup)
 	}
-	if err := os.Chmod(locked, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-
-	st := statusOf(t, poolDir, path)
-	backup := st.RecoveryBackup
-	if st.Status != StatusLeased || backup == "" || !strings.Contains(st.RecoveryReason, backup) {
-		t.Fatalf("status after partial backup = %+v", st)
-	}
-	assertFileContents(t, filepath.Join(backup, "a.txt"), "first\n")
-
-	if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte("second\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(locked, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	st = statusOf(t, poolDir, path)
-	if st.Status != StatusAvailable || st.RecoveryBackup != backup {
-		t.Fatalf("status after retry = %+v, want available reporting backup %s", st, backup)
-	}
-	assertFileContents(t, filepath.Join(backup, "a.txt"), "first\n")
-	assertFileContents(t, filepath.Join(backup, "a.txt.1"), "second\n")
-	assertFileContents(t, filepath.Join(backup, "locked", "b.txt"), "stuck\n")
-	if dirs, _ := filepath.Glob(filepath.Join(filepath.Dir(poolDir), "treehouse-recovered-backup-*")); len(dirs) != 1 {
-		t.Fatalf("backup folders = %v, want only %s", dirs, backup)
-	}
-}
-
-func TestRecoveredBackupRefusesSymlinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlinks need privileges on Windows")
-	}
-	for name, link := range map[string]func(backup, elsewhere string) error{
-		"backup folder": func(backup, elsewhere string) error { return os.Symlink(elsewhere, backup) },
-		"folder inside backup": func(backup, elsewhere string) error {
-			if err := os.Mkdir(backup, 0o700); err != nil {
-				return err
-			}
-			return os.Symlink(elsewhere, filepath.Join(backup, "scratch"))
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, poolDir, path := recoveredFixture(t)
-			file := filepath.Join(path, "scratch", "notes.txt")
-			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(file, []byte("keep\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			elsewhere := t.TempDir()
-			backup := filepath.Join(filepath.Dir(poolDir), "treehouse-recovered-backup-"+filepath.Base(poolDir)+"-1")
-			if err := link(backup, elsewhere); err != nil {
-				t.Fatal(err)
-			}
-			st := statusOf(t, poolDir, path)
-			if st.Status != StatusLeased || !strings.Contains(st.RecoveryReason, "not a real directory") {
-				t.Fatalf("status = %+v", st)
-			}
-			assertFileContents(t, file, "keep\n")
-			if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
-				t.Fatalf("files were moved through the symlink: %v", entries)
-			}
-		})
-	}
-}
-
-func TestRecoveredBackupTightensBroaderExistingFolder(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix permission bits do not govern access on Windows")
-	}
-	_, poolDir, path := recoveredFixture(t)
-	if err := os.WriteFile(filepath.Join(path, "notes.txt"), []byte("keep\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	backup := filepath.Join(filepath.Dir(poolDir), "treehouse-recovered-backup-"+filepath.Base(poolDir)+"-1")
-	if err := os.Mkdir(backup, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(backup, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	st := statusOf(t, poolDir, path)
-	if st.Status != StatusAvailable || st.RecoveryBackup != backup {
-		t.Fatalf("status = %+v, want available reporting backup %s", st, backup)
-	}
-	info, err := os.Stat(backup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Fatalf("backup mode = %o, want 700", perm)
-	}
-	assertFileContents(t, filepath.Join(backup, "notes.txt"), "keep\n")
+	assertFileContents(t, filepath.Join(backup, "notes.txt"), "kept\n")
 }

@@ -183,9 +183,9 @@ func releaseWorktree(target returnTarget, preconditions pool.ReleasePrecondition
 // reservation changing is still reclaimed, which is what `--all` does to in-use
 // slots by design.
 //
-// Every bulk release also refuses an entry that remains recovered after the
-// automatic safety check, including one recovered after the listing (for
-// example, when a state key is invalidated mid-run). Such a slot needs a named
+// Every bulk release also refuses a recovered entry, including one recovered
+// after the listing (for example, when a state key is invalidated mid-run). A
+// recovered lease is a persistent quarantine, so such a slot needs a named
 // return after inspection.
 func bulkReturnPreconditions(wt pool.WorktreeStatus) pool.ReleasePreconditions {
 	observed := wt.Reservation
@@ -245,8 +245,8 @@ func returnableStatus(wt pool.WorktreeStatus) bool {
 //
 // A slot nobody holds - available, damaged, or one the caller merely stands
 // in - is never a target at all and is counted separately. A recovered slot
-// that the automatic safety check cannot free (including a 3.0.0 upgrade
-// quarantine) is counted held and skipped; only a named return releases it.
+// is a persistent quarantine (including a 3.0.0 upgrade quarantine); it is
+// counted held and skipped, and only a named return releases it.
 func returnHeldWorktrees() error {
 	poolDir, err := repositoryPoolDir()
 	if err != nil {

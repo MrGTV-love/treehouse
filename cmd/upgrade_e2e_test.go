@@ -21,8 +21,8 @@ func TestStatusNamesReturnForThreeZeroUpgradeQuarantine(t *testing.T) {
 		t.Fatalf("return failed, code=%d stderr=%q", code, stderr)
 	}
 	poolDir := filepath.Dir(filepath.Dir(lease.Path))
-	// A private commit ensures this remains quarantined instead of being
-	// automatically freed as a proven-safe 3.0.0 recovery.
+	// A private commit makes the slot look unlike an idle one; the quarantine
+	// holds either way, since nothing frees a recovered slot but a named return.
 	if err := os.WriteFile(filepath.Join(lease.Path, "local-only.txt"), []byte("private\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestStatusNamesReturnForThreeZeroUpgradeQuarantine(t *testing.T) {
 
 // TestStatusNamesReturnForDamagedRecoveredSlot covers a recovered slot whose
 // marker could not be read at recovery: status reports it damaged, and still
-// says why it stays quarantined and names the return that frees it.
+// says the marker error and names the return that frees it.
 func TestStatusNamesReturnForDamagedRecoveredSlot(t *testing.T) {
 	repoDir, homeDir := setupTestRepo(t)
 	lease := acquireLeaseJSON(t, repoDir, homeDir, "setup")
@@ -125,7 +125,7 @@ func TestStatusNamesReturnForDamagedRecoveredSlot(t *testing.T) {
 		t.Fatalf("status failed, code=%d stderr=%q", code, stderr)
 	}
 	want := "treehouse return " + quoteReturnPath(lease.Path)
-	if !strings.Contains(stdout, "damaged") || !strings.Contains(stdout, "marker could not be read") || !strings.Contains(stdout, want) {
+	if !strings.Contains(stdout, "damaged") || !strings.Contains(stdout, "too many levels of symbolic links") || !strings.Contains(stdout, want) {
 		t.Fatalf("status does not explain the damaged recovery and name %q:\n%s", want, stdout)
 	}
 

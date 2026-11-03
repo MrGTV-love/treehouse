@@ -62,10 +62,11 @@ type WorktreeStatus struct {
 	// instead of leaving Branch empty, so a read failure is never mistaken for
 	// a detached HEAD.
 	BranchErr string
-	// RecoveryReason explains why a recovered lease was kept quarantined.
+	// RecoveryReason explains why a recovered lease is held: a reason an
+	// earlier version recorded, otherwise the persistent-quarantine notice.
 	RecoveryReason string
-	// RecoveryBackup is the non-empty folder recovery moved this slot's
-	// untracked files into, or "" when there is none.
+	// RecoveryBackup is the non-empty folder an earlier version's automatic
+	// recovery moved this slot's untracked files into, or "" when there is none.
 	RecoveryBackup string
 	// HeldOnlyByCwd reports a StatusHere slot that nobody is actually holding:
 	// it is unleased, idle, clean, quiet and undamaged, and the only reason it
@@ -947,8 +948,9 @@ func markAcquired(wt *WorktreeEntry, opts acquireOptions) error {
 var ErrLeasePreconditionFailed = errors.New("lease precondition failed")
 
 // ErrRecoveredEntry reports that a release refusing recovered entries found the
-// worktree carrying RecoveredLeaseHolder. If automatic recovery cannot prove it
-// safe, bulk return refuses it; an operator may release it by naming the slot.
+// worktree carrying RecoveredLeaseHolder. A recovered entry is a persistent
+// quarantine, so bulk return refuses it; an operator may release it by naming
+// the slot.
 var ErrRecoveredEntry = errors.New("recovered entry")
 
 // ErrOwnerPreconditionFailed reports that a release no longer identifies the
@@ -1241,7 +1243,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 			Path:           wt.Path,
 			Status:         StatusAvailable,
 			Flavor:         vcs.WorktreeBackendName(wt.Path),
-			RecoveryReason: wt.RecoveryReason,
+			RecoveryReason: recoveryReasonOf(wt),
 			RecoveryBackup: recoveryBackup(poolDir, wt.Name),
 			Reservation:    reservationOf(wt),
 		}

@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -380,4 +381,56 @@ func TestStatusReportsBackupFolderOfEarlierVersion(t *testing.T) {
 		t.Fatalf("status = %+v, want backup %s", st, backup)
 	}
 	assertFileContents(t, filepath.Join(backup, "notes.txt"), "kept\n")
+}
+
+// A conditional return must judge its condition under the state lock, after
+// anything that changed the lease while it waited: a stale condition refuses
+// and leaves the entry, whoever now holds it, and every sibling alone.
+func TestConditionalReturnRefusesHolderChangedWhileWaitingForTheLock(t *testing.T) {
+	repo, poolDir := setupLocalRepo(t)
+	paths := idleSlots(t, repo, poolDir, 2)
+	quarantine(t, poolDir, "2")
+	if _, err := LeaseExisting(poolDir, "1", "original"); err != nil {
+		t.Fatal(err)
+	}
+	holder := "original"
+	locked, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = WithStateLock(poolDir, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	done := make(chan error, 1)
+	go func() {
+		done <- ReleaseConditional(poolDir, paths[0], "", ReleasePreconditions{ExpectedLeaseHolder: &holder}, nil)
+	}()
+	// The writer below only runs once the lock is free, so the return is
+	// already queued behind it; change the holder first, then let both go.
+	state, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range state.Worktrees {
+		if state.Worktrees[i].Name == "1" {
+			state.Worktrees[i].LeaseHolder = "someone-else"
+			state.Worktrees[i].LeaseID = "0123456789abcdef0123456789abcdef"
+		}
+	}
+	if err := WriteState(poolDir, state); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, ErrLeasePreconditionFailed) {
+		t.Fatalf("ReleaseConditional = %v, want ErrLeasePreconditionFailed", err)
+	}
+	wt := entryFor(t, poolDir, paths[0])
+	if !wt.Leased || wt.LeaseHolder != "someone-else" || wt.LeaseID != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("the new holder's lease was disturbed: %#v", wt)
+	}
+	if sib := entryFor(t, poolDir, paths[1]); !sib.Leased || sib.LeaseHolder != RecoveredLeaseHolder {
+		t.Fatalf("a sibling changed: %#v", sib)
+	}
 }

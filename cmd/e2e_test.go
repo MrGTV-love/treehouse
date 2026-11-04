@@ -2552,8 +2552,8 @@ func TestPruneAllYesRecoversCorruptPoolWithoutDeletingItsWorktree(t *testing.T) 
 	}
 
 	poolDirB := filepath.Dir(filepath.Dir(wtPathB))
-	// Keep this recovered slot quarantined: its tracked edits are not safe to
-	// auto-free during the global prune.
+	// Give this recovered slot tracked edits: the global prune must still
+	// leave its quarantine in place.
 	if err := os.WriteFile(filepath.Join(wtPathB, "README.md"), []byte("keep tracked edit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

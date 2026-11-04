@@ -15,8 +15,6 @@ import (
 // pinned byte for byte. The version value is the build's version string.
 func TestCapabilitiesJSONIsPinned(t *testing.T) {
 	setReleaseVersion(t, "v9.8.7-test")
-	capabilitiesJSON = true
-	t.Cleanup(func() { capabilitiesJSON = false })
 
 	out := captureStdout(t, func() {
 		if err := capabilitiesCmd.RunE(capabilitiesCmd, nil); err != nil {
@@ -79,23 +77,38 @@ func TestCapabilitiesNeverReachesTheUpdater(t *testing.T) {
 }
 
 // End to end, from a directory that is no repository and a home that holds
-// nothing: it succeeds, prints the object, and leaves the home empty.
+// nothing: with or without --json it succeeds, prints the same one JSON
+// object, and leaves the home empty.
 func TestCapabilitiesRunsAnywhere(t *testing.T) {
 	home := t.TempDir()
 	notARepo := t.TempDir()
-	stdout, stderr, code := runTreehouseFromDir(t, notARepo, notARepo, home, nil, "capabilities", "--json")
-	if code != 0 {
-		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	var outputs []string
+	for _, args := range [][]string{{"capabilities", "--json"}, {"capabilities"}} {
+		stdout, stderr, code := runTreehouseFromDir(t, notARepo, notARepo, home, nil, args...)
+		if code != 0 {
+			t.Fatalf("%v: exit %d, stderr: %s", args, code, stderr)
+		}
+		dec := json.NewDecoder(strings.NewReader(stdout))
+		var got map[string]any
+		if err := dec.Decode(&got); err != nil {
+			t.Fatalf("%v: stdout is not a JSON object: %q: %v", args, stdout, err)
+		}
+		if dec.More() {
+			t.Fatalf("%v: stdout holds more than one JSON value: %q", args, stdout)
+		}
+		if got["schema_version"] != float64(capabilitiesSchema) || got["persistent_recovered_leases"] != true {
+			t.Fatalf("%v: capabilities = %v", args, got)
+		}
+		if v, ok := got["version"].(string); !ok || v == "" {
+			t.Fatalf("%v: version field = %v, want a nonempty string", args, got["version"])
+		}
+		if stderr != "" {
+			t.Fatalf("%v: stderr = %q, want empty", args, stderr)
+		}
+		outputs = append(outputs, stdout)
 	}
-	var got capabilitiesReport
-	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
-		t.Fatalf("stdout is not one JSON object: %q: %v", stdout, err)
-	}
-	if got.SchemaVersion != capabilitiesSchema || !got.PersistentRecoveredLeases || got.Version == "" {
-		t.Fatalf("capabilities = %+v", got)
-	}
-	if stderr != "" {
-		t.Fatalf("stderr = %q, want empty", stderr)
+	if outputs[0] != outputs[1] {
+		t.Fatalf("--json changed the output: %q vs %q", outputs[0], outputs[1])
 	}
 	entries, err := os.ReadDir(home)
 	if err != nil {
@@ -104,7 +117,7 @@ func TestCapabilitiesRunsAnywhere(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("capabilities wrote under HOME: %v", entries)
 	}
-	if _, stderr, code = runTreehouseFromDir(t, notARepo, notARepo, home, nil, "capabilities", "extra"); code == 0 {
+	if _, stderr, code := runTreehouseFromDir(t, notARepo, notARepo, home, nil, "capabilities", "extra"); code == 0 {
 		t.Fatalf("an extra argument was accepted: %q", stderr)
 	}
 }

@@ -25,14 +25,12 @@ type capabilitiesReport struct {
 	PersistentRecoveredLeases bool `json:"persistent_recovered_leases"`
 }
 
-var capabilitiesJSON bool
-
 var capabilitiesCmd = &cobra.Command{
 	Use:   "capabilities",
 	Short: "Print what this treehouse build guarantees, without touching any pool",
 	Long: `Print the behaviors of this build that other tools may rely on.
 
-With --json, print one JSON object:
+Print one JSON object (--json is accepted and changes nothing):
 
   {"schema_version":1,"version":"<build version>","persistent_recovered_leases":true}
 
@@ -54,10 +52,6 @@ process, and writes nothing, so it runs the same anywhere.`,
 			Version:                   version,
 			PersistentRecoveredLeases: true,
 		}
-		if !capabilitiesJSON {
-			fmt.Fprintf(os.Stdout, "schema_version: %d\nversion: %s\npersistent_recovered_leases: %t\n", report.SchemaVersion, report.Version, report.PersistentRecoveredLeases)
-			return nil
-		}
 		data, err := json.Marshal(report)
 		if err != nil {
 			return err
@@ -68,6 +62,6 @@ process, and writes nothing, so it runs the same anywhere.`,
 }
 
 func init() {
-	capabilitiesCmd.Flags().BoolVar(&capabilitiesJSON, "json", false, "Print the capabilities as one JSON object")
+	capabilitiesCmd.Flags().Bool("json", false, "Print the capabilities as one JSON object (the only output form)")
 	rootCmd.AddCommand(capabilitiesCmd)
 }

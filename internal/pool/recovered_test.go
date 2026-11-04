@@ -413,8 +413,8 @@ func TestConditionalReturnRefusesHolderChangedWhileWaitingForTheLock(t *testing.
 	go func() {
 		done <- ReleaseConditional(poolDir, paths[0], "", ReleasePreconditions{ExpectedLeaseHolder: &holder}, nil)
 	}()
-	// The writer below only runs once the lock is free, so the return is
-	// already queued behind it; change the holder first, then let both go.
+	// The return cannot read state under the lock while it is held, so the
+	// holder changes before the return reads it; then let both go.
 	state, err := ReadState(poolDir)
 	if err != nil {
 		t.Fatal(err)

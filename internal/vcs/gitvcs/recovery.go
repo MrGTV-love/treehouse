@@ -10,7 +10,7 @@ import (
 
 // RecoveryWorktree checks tracked edits and untracked files without trusting
 // Git's configurable submodule ignore setting or index-hidden worktree files.
-// Only root untracked paths may be moved to the recovery backup.
+// Callers treat any reported untracked path as not disposable.
 func RecoveryWorktree(dir string) ([]string, string) {
 	flags, err := runGitRaw(dir, "ls-files", "-v", "-z")
 	if err != nil {

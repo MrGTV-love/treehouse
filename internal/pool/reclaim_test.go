@@ -79,7 +79,7 @@ func TestAcquire_ForeignReclamationPreservesPausedOperation(t *testing.T) {
 
 func TestAcquire_ForeignReclamationRefusesUnsafeSlots(t *testing.T) {
 	for _, leased := range []bool{false, true} {
-		for _, risk := range []string{"dirty", "untracked", "hidden-edits", "local-only-commits", "leased", "owner", "process", "late-process", "late-hidden-edits", "process-scan-failure", "head-locked", "stale-remote-ref", "unreachable-remote", "damaged"} {
+		for _, risk := range []string{"dirty", "untracked", "hidden-edits", "skip-worktree-edits", "local-only-commits", "leased", "owner", "process", "late-process", "late-hidden-edits", "late-skip-worktree-edits", "process-scan-failure", "head-locked", "stale-remote-ref", "unreachable-remote", "damaged"} {
 			t.Run(fmt.Sprintf("leased=%t/%s", leased, risk), func(t *testing.T) {
 				foreign, caller, poolDir := setupSharedClonePool(t)
 				path, err := Acquire(foreign, poolDir, 1, nil)
@@ -90,9 +90,12 @@ func TestAcquire_ForeignReclamationRefusesUnsafeSlots(t *testing.T) {
 					t.Fatal(err)
 				}
 				switch risk {
-				case "dirty", "hidden-edits":
-					if risk == "hidden-edits" {
+				case "dirty", "hidden-edits", "skip-worktree-edits":
+					switch risk {
+					case "hidden-edits":
 						runGit(t, path, "update-index", "--assume-unchanged", "README.md")
+					case "skip-worktree-edits":
+						runGit(t, path, "update-index", "--skip-worktree", "README.md")
 					}
 					if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("keep my edits\n"), 0o644); err != nil {
 						t.Fatal(err)
@@ -133,7 +136,7 @@ func TestAcquire_ForeignReclamationRefusesUnsafeSlots(t *testing.T) {
 					if err := WriteState(poolDir, state); err != nil {
 						t.Fatal(err)
 					}
-				case "process", "late-process", "late-hidden-edits", "process-scan-failure":
+				case "process", "late-process", "late-hidden-edits", "late-skip-worktree-edits", "process-scan-failure":
 					oldScan := findProcessesInWorktree
 					calls := 0
 					findProcessesInWorktree = func(candidate string) ([]process.ProcessInfo, error) {
@@ -147,9 +150,13 @@ func TestAcquire_ForeignReclamationRefusesUnsafeSlots(t *testing.T) {
 						if risk == "late-process" && calls == 1 {
 							return nil, nil
 						}
-						if risk == "late-hidden-edits" {
+						if risk == "late-hidden-edits" || risk == "late-skip-worktree-edits" {
 							if calls == 2 {
-								runGit(t, path, "update-index", "--assume-unchanged", "README.md")
+								flag := "--assume-unchanged"
+								if risk == "late-skip-worktree-edits" {
+									flag = "--skip-worktree"
+								}
+								runGit(t, path, "update-index", flag, "README.md")
 								if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("late writer's work\n"), 0o644); err != nil {
 									t.Fatal(err)
 								}
@@ -204,7 +211,7 @@ func TestAcquire_ForeignReclamationRefusesUnsafeSlots(t *testing.T) {
 				if err != nil || !reflect.DeepEqual(before, after) {
 					t.Fatalf("refusal changed foreign state: %#v -> %#v (%v)", before, after, err)
 				}
-				if risk == "late-hidden-edits" {
+				if risk == "late-hidden-edits" || risk == "late-skip-worktree-edits" {
 					readme = []byte("late writer's work\n")
 				}
 				if content, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(content) != string(readme) {

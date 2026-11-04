@@ -11,6 +11,47 @@ import (
 
 const recoveredHolderLiteral = "recovered: state file was corrupt or truncated; verify before reuse"
 
+// A reason an earlier release saved on a recovered entry described that
+// release's sweep and may be false now; status text and JSON show the
+// persistent-quarantine notice instead.
+func TestStatusShowsQuarantineNoticeNotSavedReason(t *testing.T) {
+	const saved = "a process is using this worktree (a shell standing in it counts); stop it or leave the worktree"
+	const notice = "treehouse never frees a recovered slot on its own; it is held until it is returned by name"
+	repoDir, homeDir := setupTestRepo(t)
+	a := acquireLeaseJSON(t, repoDir, homeDir, "setup")
+	poolDir := filepath.Dir(filepath.Dir(a.Path))
+	data, err := json.Marshal(map[string]any{"version": 4, "worktrees": []map[string]any{{
+		"name": filepath.Base(filepath.Dir(a.Path)), "path": a.Path, "created_at": time.Now().Add(-48 * time.Hour),
+		"leased": true, "lease_holder": recoveredHolderLiteral, "leased_at": time.Now().Add(-time.Hour),
+		"recovery_reason": saved,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(poolDir, "treehouse-state.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, stderr, code := runTreehouse(t, repoDir, homeDir, nil, "status")
+	if code != 0 {
+		t.Fatalf("status failed, code=%d stderr=%q", code, stderr)
+	}
+	if strings.Contains(out, saved) || !strings.Contains(out, "recovery held: "+notice) {
+		t.Fatalf("status text does not show the quarantine notice:\n%s", out)
+	}
+	out, stderr, code = runTreehouse(t, repoDir, homeDir, nil, "status", "--json")
+	if code != 0 {
+		t.Fatalf("status --json failed, code=%d stderr=%q", code, stderr)
+	}
+	var worktrees []statusJSONWorktree
+	if err := json.Unmarshal([]byte(out), &worktrees); err != nil {
+		t.Fatalf("invalid status JSON %q: %v", out, err)
+	}
+	if len(worktrees) != 1 || worktrees[0].RecoveryReason != notice {
+		t.Fatalf("status --json recovery_reason = %+v, want %q", worktrees, notice)
+	}
+}
+
 // TestConditionalReturnClearsOnlyTheNamedRecoveredSlot covers the one way out of
 // a persistent quarantine: an exact-target conditional return, with no --force
 // and no prompt answer. A stale condition changes nothing, a sibling recovered

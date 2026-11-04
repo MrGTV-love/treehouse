@@ -324,11 +324,14 @@ func TestNamedReturnReleasesRecoveredEntryForReuse(t *testing.T) {
 	}
 }
 
-func TestRecoveryReasonClearedByNamedReturn(t *testing.T) {
+// A reason an earlier version saved described its own sweep, which may no
+// longer hold; status reports the quarantine notice instead, and a named return
+// clears the saved field.
+func TestSavedRecoveryReasonIsNeverReported(t *testing.T) {
 	repo, poolDir := setupLocalRepo(t)
 	path := idleSlots(t, repo, poolDir, 1)[0]
 	writeRawState(t, poolDir, State{Version: stateVersion, Worktrees: []WorktreeEntry{{Name: "1", Path: path, Leased: true, LeaseHolder: RecoveredLeaseHolder, RecoveryReason: "a reason an earlier version recorded"}}})
-	if st := statusOf(t, poolDir, path); st.RecoveryReason != "a reason an earlier version recorded" {
+	if st := statusOf(t, poolDir, path); st.Status != StatusLeased || st.RecoveryReason != recoveredQuarantineReason {
 		t.Fatalf("status = %+v", st)
 	}
 	if err := Release(poolDir, path); err != nil {
@@ -336,6 +339,9 @@ func TestRecoveryReasonClearedByNamedReturn(t *testing.T) {
 	}
 	if st := statusOf(t, poolDir, path); st.Status != StatusAvailable || st.RecoveryReason != "" {
 		t.Fatalf("returned slot reads %+v", st)
+	}
+	if wt := entryFor(t, poolDir, path); wt.RecoveryReason != "" {
+		t.Fatalf("return kept the saved reason: %#v", wt)
 	}
 }
 

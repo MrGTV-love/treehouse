@@ -2575,6 +2575,24 @@ func TestPruneAllYesRecoversCorruptPoolWithoutDeletingItsWorktree(t *testing.T) 
 	if _, err := os.Stat(wtPathB); err != nil {
 		t.Fatalf("expected repo B's worktree to remain (its pool's state was corrupt): %v", err)
 	}
+	statusOut, statusErr, code := runTreehouse(t, repoB, homeDir, nil, "status", "--json")
+	if code != 0 {
+		t.Fatalf("repo B status --json failed (code %d): %s", code, statusErr)
+	}
+	var statusB []statusJSONWorktree
+	if err := json.Unmarshal([]byte(statusOut), &statusB); err != nil {
+		t.Fatalf("invalid status JSON %q: %v", statusOut, err)
+	}
+	nameB := filepath.Base(filepath.Dir(wtPathB))
+	held := false
+	for _, wt := range statusB {
+		if wt.Name == nameB {
+			held = wt.Status == "leased" && wt.LeaseHolder == recoveredHolderLiteral
+		}
+	}
+	if !held {
+		t.Fatalf("prune --all --yes released repo B's recovered slot %s: %+v", nameB, statusB)
+	}
 }
 
 func TestPruneWithoutAllScopesToCurrentRepo(t *testing.T) {

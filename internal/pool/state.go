@@ -68,8 +68,8 @@ type WorktreeEntry struct {
 	RecoveryError string `json:"recovery_error,omitempty"`
 	// RecoveryReason is written only by earlier treehouse versions, whose
 	// automatic recovery recorded why it kept a recovered lease quarantined.
-	// It is kept so their state still parses; this version never sets it, and
-	// clearing the lease clears it.
+	// It is kept so their state still parses; this version never sets or
+	// reports it, and clearing the lease clears it.
 	RecoveryReason string `json:"recovery_reason,omitempty"`
 }
 

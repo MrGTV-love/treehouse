@@ -33,16 +33,17 @@ func recoveryBackup(poolDir, name string) string {
 	return backup
 }
 
-// recoveredQuarantineReason is what status says about a recovered lease that
-// carries no reason of its own. Treehouse no longer examines a recovered entry
-// to decide whether to free it, so the notice is the same for every one.
+// recoveredQuarantineReason is what status says about every recovered lease.
+// Treehouse no longer examines a recovered entry to decide whether to free it,
+// so the notice is the same for every one.
 const recoveredQuarantineReason = "treehouse never frees a recovered slot on its own; it is held until it is returned by name"
 
-// recoveryReasonOf is the reason status reports for wt: the one an earlier
-// version recorded, else the persistent-quarantine notice for a recovered lease.
+// recoveryReasonOf is the reason status reports for wt: the
+// persistent-quarantine notice for a recovered lease, and "" otherwise. A
+// reason an earlier version recorded described its own sweep and is never shown.
 func recoveryReasonOf(wt WorktreeEntry) string {
-	if wt.RecoveryReason != "" || !wt.Leased || wt.LeaseHolder != RecoveredLeaseHolder {
-		return wt.RecoveryReason
+	if !wt.Leased || wt.LeaseHolder != RecoveredLeaseHolder {
+		return ""
 	}
 	return recoveredQuarantineReason
 }

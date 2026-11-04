@@ -62,8 +62,8 @@ type WorktreeStatus struct {
 	// instead of leaving Branch empty, so a read failure is never mistaken for
 	// a detached HEAD.
 	BranchErr string
-	// RecoveryReason explains why a recovered lease is held: a reason an
-	// earlier version recorded, otherwise the persistent-quarantine notice.
+	// RecoveryReason explains why a recovered lease is held: always the
+	// persistent-quarantine notice, and empty for any other entry.
 	RecoveryReason string
 	// RecoveryBackup is the non-empty folder an earlier version's automatic
 	// recovery moved this slot's untracked files into, or "" when there is none.

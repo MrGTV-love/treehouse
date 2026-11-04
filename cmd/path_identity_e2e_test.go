@@ -79,7 +79,7 @@ func TestCaseAliasPoolLifecycle(t *testing.T) {
 	}
 	assertHeld()
 	// Simulate a legacy recovered alias without changing the original signed
-	// inventory. Loading must consolidate it before automatic recovery acts.
+	// inventory. Loading must consolidate it before any command acts on it.
 	data, err := os.ReadFile(filepath.Join(poolDir, "treehouse-state.json"))
 	if err != nil {
 		t.Fatal(err)

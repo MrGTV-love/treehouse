@@ -171,9 +171,10 @@ func TestUpgrade_AdoptsTwoXRewriteBesideKey(t *testing.T) {
 	}
 }
 
-// TestUpgrade_AutoFreesThreeZeroQuarantine covers safe slots that 3.0.0
-// already rewrote as recovered. Proven idle, clean, landed slots become reusable.
-func TestUpgrade_AutoFreesThreeZeroQuarantine(t *testing.T) {
+// TestUpgrade_ThreeZeroQuarantineStaysLeased covers slots that 3.0.0 already
+// rewrote as recovered. However idle, clean and landed they look, they stay
+// leased until a return names them, and acquire never hands them out.
+func TestUpgrade_ThreeZeroQuarantineStaysLeased(t *testing.T) {
 	repoDir, poolDir := setupLocalRepo(t)
 	paths := idleSlots(t, repoDir, poolDir, 2)
 	stamp := time.Now().Add(-time.Hour).Round(0)
@@ -190,21 +191,23 @@ func TestUpgrade_AutoFreesThreeZeroQuarantine(t *testing.T) {
 	writeRawState(t, poolDir, State{Version: stateVersion, Worktrees: entries})
 
 	for _, path := range paths {
-		if st := statusOf(t, poolDir, path); st.Status != StatusAvailable {
-			t.Fatalf("safe 3.0.0 slot %s reads %s, want available", path, st.Status)
+		if st := statusOf(t, poolDir, path); st.Status != StatusLeased || st.LeaseHolder != RecoveredLeaseHolder {
+			t.Fatalf("3.0.0 slot %s reads %+v, want it still leased as recovered", path, st)
 		}
 	}
-	got, err := AcquireLease(repoDir, poolDir, len(paths), nil, "after-fix")
-	if err != nil {
-		t.Fatalf("acquire from recovered pool: %v", err)
+	if got, err := AcquireLease(repoDir, poolDir, len(paths), nil, "after-fix"); err == nil {
+		t.Fatalf("acquired %s from a pool whose every slot is recovered", got)
 	}
-	found := false
 	for _, path := range paths {
-		if got == path {
-			found = true
+		if err := Release(poolDir, path); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !found {
-		t.Fatalf("acquired %s, want a recovered slot %v", got, paths)
+	got, err := AcquireLease(repoDir, poolDir, len(paths), nil, "after-return")
+	if err != nil {
+		t.Fatalf("acquire after returning the slots by name: %v", err)
+	}
+	if got != paths[0] && got != paths[1] {
+		t.Fatalf("acquired %s, want a returned slot %v", got, paths)
 	}
 }

@@ -66,8 +66,10 @@ type WorktreeEntry struct {
 	// reason, so a skipped slot is visible and never reads as available or an
 	// ordinarily leased home.
 	RecoveryError string `json:"recovery_error,omitempty"`
-	// RecoveryReason records why automatic recovery kept a recovered lease
-	// quarantined; clearing the lease clears it.
+	// RecoveryReason is written only by earlier treehouse versions, whose
+	// automatic recovery recorded why it kept a recovered lease quarantined.
+	// It is kept so their state still parses; this version never sets or
+	// reports it, and clearing the lease clears it.
 	RecoveryReason string `json:"recovery_reason,omitempty"`
 }
 
@@ -363,8 +365,9 @@ func recoverMissingStateEntries(poolDir string, s State) (State, error) {
 // (recoverMissingStateEntries or recoverCorruptState), or one ReadState
 // quarantined because its inventory failed to authenticate. treehouse 3.0.0
 // also put it on every entry of valid pre-3.0 state. None of these can be told
-// apart, so all stay leased until recoverQuarantinedEntries proves one safe or
-// a `return` naming the slot releases it; bulk `return --all` leaves them alone.
+// apart, so all stay leased: a persistent quarantine that no command frees as a
+// side effect of another. Only a `return` naming the slot releases one; bulk
+// `return --all` leaves them alone.
 const RecoveredLeaseHolder = "recovered: state file was corrupt or truncated; verify before reuse"
 
 // quarantineEntry builds the conservative entry both recovery scans write for a
@@ -425,15 +428,15 @@ func recoverOneWorktree(slotName, wtPath string) (WorktreeEntry, bool) {
 // evidence alone cannot tell an idle spare from a live, process-independent
 // lease. Every recovered entry is therefore marked leased: Acquire and prune
 // skip it, and destroy only removes it via an explicit, single-target
-// --include-leased. Only automatic recovery of a proven-safe slot or a return
-// naming the slot clears the lease; recovery lost the trusted inventory of
+// --include-leased. Nothing frees one automatically; only a return naming the
+// slot clears the lease. Recovery lost the trusted inventory of
 // ignored files seeded into the worktree, so those files are not cleaned up.
 func recoverCorruptState(poolDir string, parseErr error) (State, error) {
 	recovered, err := recoverMissingStateEntries(poolDir, State{})
 	if err != nil {
 		return State{}, fmt.Errorf("state file %s is corrupt or truncated (%v), and recovery could not scan pool directory: %w", stateFilePath(poolDir), parseErr, err)
 	}
-	fmt.Fprintf(os.Stderr, "treehouse: WARNING: state file %s is corrupt or truncated (%v); recovering worktrees found on disk as leased because their seeded-file inventory is unknown. See `treehouse status` for automatic recovery results and any slots that still need inspection.\n", stateFilePath(poolDir), parseErr)
+	fmt.Fprintf(os.Stderr, "treehouse: WARNING: state file %s is corrupt or truncated (%v); recovering worktrees found on disk as leased because their seeded-file inventory is unknown. They stay leased until you inspect each one in `treehouse status` and return it by name.\n", stateFilePath(poolDir), parseErr)
 	return recovered, nil
 }
 
@@ -542,8 +545,7 @@ func WithStateLock(poolDir string, fn func() error) error {
 	}
 	defer unlockFile(f)
 
-	if err := recoverQuarantinedEntries(poolDir); err != nil {
-		return err
-	}
+	// WithStateLock only provides exclusion. It never inspects, moves, or frees
+	// another entry: a recovered lease is cleared only by a return naming it.
 	return fn()
 }

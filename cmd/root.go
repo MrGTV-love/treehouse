@@ -42,8 +42,10 @@ so that multiple AI coding agents can work on the same repo in parallel.`,
 			return
 		}
 		// pool-dir promises to write nothing, and a stale cache would spawn a
-		// background check that does.
-		if cmd.Name() == "update" || cmd.Name() == "pool-dir" {
+		// background check that does. capabilities promises to make no network
+		// call and start no process, so it returns here as well, before the
+		// cache is read.
+		if cmd.Name() == "update" || cmd.Name() == "pool-dir" || cmd.Name() == "capabilities" {
 			return
 		}
 

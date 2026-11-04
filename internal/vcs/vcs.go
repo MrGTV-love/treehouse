@@ -247,11 +247,6 @@ func RecoveryWorktree(path string) ([]string, string) {
 	return gitvcs.RecoveryWorktree(path)
 }
 
-// RecoveryHeadContained checks whether HEAD is reachable from a remote ref or base.
-func RecoveryHeadContained(path, base string) bool {
-	return gitvcs.RecoveryHeadContained(path, base)
-}
-
 // FindRepoRoot returns the repository or worktree root for the current
 // working directory.
 func FindRepoRoot() (string, error) { return backendFor("").FindRepoRootFrom("") }

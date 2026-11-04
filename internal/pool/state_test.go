@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -401,16 +402,19 @@ func TestReadState_RecoveredWorktreesBlockAcquire(t *testing.T) {
 		t.Fatalf("truncate state file: %v", err)
 	}
 
-	if _, err := Acquire(repoDir, poolDir, 1, nil); err != nil {
-		t.Fatalf("Acquire should auto-free the provably safe recovered slot: %v", err)
+	// The slot is clean and merged, which the old sweep would have freed.
+	// A recovered slot is a persistent quarantine: Acquire reports capacity
+	// exhaustion and the slot stays leased until a return names it.
+	if _, err := Acquire(repoDir, poolDir, 1, nil); err == nil || !strings.Contains(err.Error(), "max_trees = 1") {
+		t.Fatalf("Acquire = %v, want a capacity error: the recovered slot must not be handed out", err)
 	}
 
 	state, err := ReadState(poolDir)
 	if err != nil {
 		t.Fatalf("ReadState: %v", err)
 	}
-	if len(state.Worktrees) != 1 || state.Worktrees[0].Leased || state.Worktrees[0].OwnerPID == 0 {
-		t.Fatalf("state after auto-recovery/acquire = %+v, want the slot acquired by this run", state.Worktrees)
+	if len(state.Worktrees) != 1 || !state.Worktrees[0].Leased || state.Worktrees[0].LeaseHolder != RecoveredLeaseHolder || state.Worktrees[0].OwnerPID != 0 {
+		t.Fatalf("state after Acquire = %+v, want the recovered slot still quarantined", state.Worktrees)
 	}
 }
 

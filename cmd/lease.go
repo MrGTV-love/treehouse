@@ -16,9 +16,11 @@ import (
 )
 
 var (
-	leaseHolderFlag string
-	leaseJSONFlag   bool
-	leasePathFlag   string
+	leaseHolderFlag         string
+	leaseJSONFlag           bool
+	leasePathFlag           string
+	leaseRecoverFlag        bool
+	leaseExpectedHolderFlag string
 )
 
 var leaseCmd = &cobra.Command{
@@ -39,8 +41,18 @@ checks out the worktree, so it is safe on a slot that already holds live
 work. Use it to give a worktree acquired with plain 'get' - or created
 before leases existed - the same protection a leased acquisition has: a
 leased worktree is never handed out by a later get and never removed by
-prune or destroy, even with no process running inside it, until you release
-it with 'treehouse return <path>'.
+prune, even with no process running inside it, until you release it with
+'treehouse return <path>'. Destroy requires its
+existing explicit single-target --include-leased opt-in.
+
+After verifying that a recovered slot holds the named owner's live copy, use
+--recover with --path, --if-lease-holder (the exact current recovered holder)
+and an explicit nonblank --lease-holder. This acknowledges the holder in one
+atomic state change without ever releasing or touching the slot. It refuses
+ordinary leases, destroying slots, invalid labels and unreadable/corrupt state.
+Treehouse does not verify copy ownership. The new ordinary lease has a fresh
+identity and timestamp; return --all no longer skips it as recovered. Unknown
+seeded ignored files remain unrecorded and are not cleaned by this operation.
 
 By default it prints only the worktree's absolute path to stdout; add --json
 for the lease identity and metadata. All banners go to stderr.`,
@@ -52,10 +64,25 @@ func init() {
 	leaseCmd.Flags().StringVar(&leaseHolderFlag, "lease-holder", "", "Optional label recorded as the lease holder (defaults to $TREEHOUSE_LEASE_HOLDER)")
 	leaseCmd.Flags().BoolVar(&leaseJSONFlag, "json", false, "Print the lease as JSON")
 	leaseCmd.Flags().StringVar(&leasePathFlag, "path", "", "Lease the worktree at this exact path instead of naming it; its pool is found from the path")
+	leaseCmd.Flags().BoolVar(&leaseRecoverFlag, "recover", false, "Hand a verified recovered lease to its real holder without releasing it (requires --path, --if-lease-holder and --lease-holder)")
+	leaseCmd.Flags().StringVar(&leaseExpectedHolderFlag, "if-lease-holder", "", "Expected current recovered holder; required with --recover")
 	rootCmd.AddCommand(leaseCmd)
 }
 
 func validateLeaseArgs(cmd *cobra.Command, args []string) error {
+	if leaseRecoverFlag {
+		if !cmd.Flags().Changed("path") {
+			return fmt.Errorf("--recover requires --path, not a worktree name")
+		}
+		if !cmd.Flags().Changed("if-lease-holder") {
+			return fmt.Errorf("--recover requires --if-lease-holder")
+		}
+		if !cmd.Flags().Changed("lease-holder") {
+			return fmt.Errorf("--recover requires an explicit --lease-holder")
+		}
+	} else if cmd.Flags().Changed("if-lease-holder") {
+		return fmt.Errorf("--if-lease-holder requires --recover")
+	}
 	if cmd.Flags().Changed("path") {
 		if len(args) > 0 {
 			return fmt.Errorf("lease takes either a worktree name or --path, not both")
@@ -94,6 +121,33 @@ func resolveLeasePathTarget(path string) (poolDir, name string, err error) {
 }
 
 func leaseRunE(cmd *cobra.Command, args []string) error {
+	if leaseRecoverFlag {
+		path, err := filepath.Abs(leasePathFlag)
+		if err != nil {
+			return err
+		}
+		// Resolve only the pool here. Membership and the holder comparison
+		// belong to HandoffRecoveredLease's locked, strict state read, not
+		// FindByPath/ReadState, which may recover a corrupt file as a side effect.
+		poolDir := filepath.Dir(filepath.Dir(path))
+		if !pool.IsPoolDir(poolDir) {
+			repoRoot, err := vcs.FindMainRepoRootFrom(path)
+			if err != nil {
+				return fmt.Errorf("worktree %s is not managed by treehouse", path)
+			}
+			poolDir, err = poolDirForRepoRoot(repoRoot)
+			if err != nil {
+				return err
+			}
+		}
+		lease, err := pool.HandoffRecoveredLease(poolDir, path, leaseExpectedHolderFlag, leaseHolderFlag)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "🌳 Leased worktree at %s. Run 'treehouse return %s' to release it.\n",
+			ui.PrettyPath(lease.Path), ui.PrettyPath(lease.Path))
+		return printExistingLease(lease)
+	}
 	holder := leaseHolderFlag
 	if holder == "" {
 		holder = os.Getenv("TREEHOUSE_LEASE_HOLDER")
@@ -131,6 +185,10 @@ func leaseRunE(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "🌳 Leased worktree %s at %s. Run 'treehouse return %s' to release it.\n",
 		name, ui.PrettyPath(lease.Path), ui.PrettyPath(lease.Path))
+	return printExistingLease(lease)
+}
+
+func printExistingLease(lease pool.LeaseInfo) error {
 	if leaseJSONFlag {
 		return json.NewEncoder(os.Stdout).Encode(lease)
 	}

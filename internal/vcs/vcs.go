@@ -426,6 +426,15 @@ func RemoveCleanWorktree(repoRoot, path string) error {
 	return backendForRemoval(repoRoot, path).RemoveCleanWorktree(repoRoot, path)
 }
 
+// RequireCleanRemovalAllowed applies Git's shared non-forced-removal judgment.
+// It deliberately leaves jj behavior unchanged; only Git has this judgment.
+func RequireCleanRemovalAllowed(repoRoot, path string, seededPaths []string) error {
+	if WorktreeBackendName(path) != "git" {
+		return nil
+	}
+	return gitvcs.RequireCleanRemovalAllowed(repoRoot, path, seededPaths)
+}
+
 // ErrWorktreeNotDisposable is a safety refusal before automatic removal starts.
 var ErrWorktreeNotDisposable = gitvcs.ErrWorktreeNotDisposable
 

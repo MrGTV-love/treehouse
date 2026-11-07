@@ -728,6 +728,14 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 		return worktree, skipped, true, context, nil
 	}
 	worktree.Bytes = bytes
+	seededPaths := wt.SeededPaths
+	if !wt.SeedInventoryKnown {
+		seededPaths = nil
+	}
+	if err := vcs.RequireCleanRemovalAllowed(context.RepoRoot, worktree.Path, seededPaths); err != nil {
+		skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotVerify, err.Error(), "")
+		return worktree, skipped, true, context, nil
+	}
 	return worktree, skipped, true, context, nil
 }
 

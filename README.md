@@ -157,7 +157,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
   If an existing state file is empty, truncated, or omits an on-disk worktree, treehouse rebuilds the missing entries. See [Recovering missing pool state](#recovering-missing-pool-state) for how recovered slots are quarantined and returned.
 - **Gitignored file seeding** — commit a `.worktreeinclude` file for the default selection, or pass `get --include-file <path>` for a personal manifest. Selected local files are copied from the main checkout on each acquire. See [Seeding gitignored files](#seeding-gitignored-files).
 - **Dirty detection** - treehouse treats tracked changes and untracked files as dirty, even when repository config hides untracked files from normal `git status` output.
-- **Safe pruning** - By default, `treehouse prune` removes only clean, idle managed worktrees with landed HEAD commits. See [Base branch](#base-branch) for the merge rule.
+- **Safe pruning** - By default, `treehouse prune` removes only clean, idle managed worktrees with landed HEAD commits and, for Git slots, provably regenerable ignored files. See [Pruning stale worktrees and orphans](#pruning-stale-worktrees-and-orphans) for the ignored-file rule and [Base branch](#base-branch) for the merge rule.
   `treehouse prune --all` applies the same safety checks across every managed pool under the user-level treehouse root.
   Backing-repository-missing orphans are reported by default; `--prune-orphans` includes them as unverified prune candidates, and `--yes` is required before deletion.
   It is a dry run unless you pass `--yes`.
@@ -458,6 +458,10 @@ Without `--prune-orphans`, pass `treehouse prune --all --yes` to delete only the
 
 Prune ignores worktrees that are currently in use, leased, or reserved by another lifecycle operation.
 It skips idle worktrees that are unsafe to remove and prints the skip reason, such as uncommitted tracked or untracked changes, or an unlanded HEAD commit (see [Base branch](#base-branch) for the merge rule).
+Git prune uses the same ignored-file removal judgment as foreign-slot reclamation, both during planning and at the final pre-delete check. Every ignored path must be in the authenticated inventory copied by `.worktreeinclude` or `get --include-file`, and both its slot file and the file at the same relative path in the owning checkout must be regular files with equal bytes. An unseeded path, changed seed, unreadable or missing source, or symlink prevents removal. The inventory records paths, not seed-time hashes: the comparison is against the **current** source, so changing or deleting that source can prevent pruning an otherwise unchanged slot. Seeding preserves source permission bits, but the removal comparison checks bytes and regular-file type, not permission-only changes.
+
+The final check also re-compares the source after pre-destroy hooks. It does not exclude concurrent writers: a write after that check and before native Git removal can still be deleted. This ignored-file judgment does not cover jj slots or explicitly opted-in missing-repository orphans. Do not enable unattended prune until the unseeded and seeded-then-modified cases have passed through the actual deletion path at the installed binary's head; Treehouse installs no scheduler and cannot control schedules configured outside this repository.
+
 Skip output is grouped by reason so large global sweeps stay scannable.
 When `origin` exists, prune fetches it and checks the current remote default branch tracking ref first.
 Without `origin`, prune checks the local default branch ref first.
@@ -470,7 +474,7 @@ Use `--verbose` to show the underlying version-control diagnostic details for sk
 
 ### Destroying worktrees
 
-`treehouse destroy` is the deliberate tool for removing a worktree even though it still has unlanded work, but it is safe by default and holds itself to the same bar as `prune`.
+`treehouse destroy` is the deliberate tool for removing a worktree even though it still has unlanded work. It classifies slot risks and is a dry run by default, but does not apply prune's ignored-file judgment: inspect and preserve ignored payloads yourself before executing destroy.
 
 Targets are narrow and explicit:
 
@@ -486,7 +490,7 @@ It prints a risk-revealing preview - one or more status labels (`[disposable]`, 
 Pass `--yes` to execute.
 It never prints a blind "all worktrees destroyed"; the summary always reports exactly what was destroyed and what was skipped.
 
-A bare `treehouse destroy <pool> --all --yes` removes only the genuinely disposable set (merged, clean, idle, unleased - the same set `prune` would take) and SKIPS everything else, telling you which flag would include it.
+A bare `treehouse destroy <pool> --all --yes` removes only slots classified as merged, clean, idle and unleased and SKIPS everything else, telling you which flag would include it. Unlike prune, this classification does not inspect ignored-file regenerability.
 Each risky class is its own opt-in, so removing risky worktrees can never be a reflexive `--yes`:
 
 - `--include-unlanded` also removes worktrees with uncommitted changes, a HEAD not merged into the default branch, or contents treehouse cannot verify, such as a missing backing repository (irreversible data loss).
@@ -599,9 +603,10 @@ lists each slot's first refusal reason (for example a held `HEAD.lock` or an
 unseeded ignored path). Reuse of a safe own-clone slot still works at the cap.
 
 Automatic reclamation removes the old checkout using Git's non-forced
-clean-worktree removal. Ignored files may be deleted only when every path is
-in the authenticated seeded-file inventory; unseeded ignored configuration,
-build output, and caches prevent reclamation. Git replacement refs also
+clean-worktree removal. It uses the same [ignored-file rule as Git prune](#pruning-stale-worktrees-and-orphans):
+a modified seeded file now prevents reclamation too, even when its pathname is
+in the authenticated inventory. Unseeded ignored configuration, build output,
+and caches prevent reclamation. Git replacement refs also
 prevent reclamation. Worktrees are never migrated between clones, and files
 beside the old checkout are left alone. The deletion is recorded before
 creating the replacement, so a later creation failure leaves a freed slot

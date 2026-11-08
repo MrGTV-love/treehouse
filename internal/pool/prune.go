@@ -732,7 +732,7 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 	if !wt.SeedInventoryKnown {
 		seededPaths = nil
 	}
-	if err := vcs.RequireCleanRemovalAllowed(context.RepoRoot, worktree.Path, seededPaths); err != nil {
+	if err := vcs.RequireCleanRemovalAllowed(context.RepoRoot, poolDir, worktree.Path, seededPaths); err != nil {
 		skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotVerify, err.Error(), "")
 		return worktree, skipped, true, context, nil
 	}

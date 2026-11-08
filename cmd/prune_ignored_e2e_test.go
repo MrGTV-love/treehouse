@@ -26,6 +26,8 @@ func TestPruneIgnoredFiles(t *testing.T) {
 			"untracked", "mixed-unseeded", "mixed-modified", "source-changed",
 			"source-missing", "source-directory", "source-symlink", "slot-symlink",
 			"reverted", "unknown-inventory", "invalid-inventory",
+			"hardlink-source", "seeded-symlink", "modified-equal-source-time",
+			"equal-new-source", "equal-different-time", "mode-only",
 		} {
 			t.Run(fmt.Sprintf("all=%t/%s", all, scenario), func(t *testing.T) {
 				repo, home := setupTestRepo(t)
@@ -53,6 +55,14 @@ func TestPruneIgnoredFiles(t *testing.T) {
 					write(filepath.Join(repo, ".worktreeinclude"), "seed.ignored\nother.ignored\n")
 					write(filepath.Join(repo, "seed.ignored"), "original\n")
 					write(filepath.Join(repo, "other.ignored"), "unchanged\n")
+					if scenario == "seeded-symlink" {
+						if err := os.Remove(filepath.Join(repo, "seed.ignored")); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink("other.ignored", filepath.Join(repo, "seed.ignored")); err != nil {
+							t.Fatal(err)
+						}
+					}
 				}
 				gitCmd(t, repo, "add", ".")
 				gitCmd(t, repo, "commit", "-m", "prune ignored fixture")
@@ -82,12 +92,23 @@ func TestPruneIgnoredFiles(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if sourceInfo.Mode().Perm() != slotInfo.Mode().Perm() {
+					if scenario != "seeded-symlink" && sourceInfo.Mode().Perm() != slotInfo.Mode().Perm() {
 						t.Fatal("seeding did not preserve source permission bits")
 					}
 					sourceBytes, err := os.ReadFile(filepath.Join(repo, "seed.ignored"))
 					if err != nil {
 						t.Fatal(err)
+					}
+					if scenario == "seeded-symlink" {
+						target, err := os.Readlink(filepath.Join(repo, "seed.ignored"))
+						if err != nil {
+							t.Fatal(err)
+						}
+						sourceBytes = []byte(target)
+						if !slotInfo.Mode().IsRegular() {
+							t.Fatalf("seeding did not materialize link text as a regular file: %v", slotInfo.Mode())
+						}
+						t.Logf("Fresh real seeding writes regular-file link-target text %q", target)
 					}
 					slotBytes, err := os.ReadFile(file)
 					if err != nil || !bytes.Equal(sourceBytes, slotBytes) {
@@ -105,6 +126,51 @@ func TestPruneIgnoredFiles(t *testing.T) {
 				case "modified-same-size", "mixed-modified":
 					write(file, "modified\n")
 					if err := os.Chtimes(file, seededTime, seededTime); err != nil {
+						t.Fatal(err)
+					}
+				case "hardlink-source":
+					if err := os.Remove(file); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Link(filepath.Join(repo, "seed.ignored"), file); err != nil {
+						t.Fatal(err)
+					}
+					a, err := os.Stat(file)
+					if err != nil {
+						t.Fatal(err)
+					}
+					b, err := os.Stat(filepath.Join(repo, "seed.ignored"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !os.SameFile(a, b) {
+						t.Fatal("hard-link fixture is not the same inode")
+					}
+				case "modified-equal-source-time":
+					write(file, "modified\n")
+					info, err := os.Stat(filepath.Join(repo, "seed.ignored"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chtimes(file, info.ModTime(), info.ModTime()); err != nil {
+						t.Fatal(err)
+					}
+					got, err := os.Stat(file)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.Size() != info.Size() || !got.ModTime().Equal(info.ModTime()) {
+						t.Fatal("equal-size equal-time fixture not established")
+					}
+				case "equal-new-source":
+					write(file, "modified\n")
+					write(filepath.Join(repo, "seed.ignored"), "modified\n")
+				case "equal-different-time":
+					if err := os.Chtimes(file, seededTime.Add(-time.Hour), seededTime.Add(-time.Hour)); err != nil {
+						t.Fatal(err)
+					}
+				case "mode-only":
+					if err := os.Chmod(file, 0o600); err != nil {
 						t.Fatal(err)
 					}
 				case "modified-size":
@@ -190,7 +256,7 @@ func TestPruneIgnoredFiles(t *testing.T) {
 				}
 				dry := run(pruneArgs...)
 				out := run(append(pruneArgs, "--yes")...)
-				allow := scenario == "unchanged" || scenario == "reverted"
+				allow := scenario == "unchanged" || scenario == "reverted" || scenario == "seeded-symlink" || scenario == "equal-new-source" || scenario == "equal-different-time" || scenario == "mode-only"
 				if allow {
 					if _, err := os.Lstat(slot); !os.IsNotExist(err) {
 						t.Errorf("regenerable slot not removed: %v", err)

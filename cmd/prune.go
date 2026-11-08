@@ -31,8 +31,11 @@ var pruneCmd = &cobra.Command{
 A worktree is stale only when treehouse manages it, no owner reservation or
 running process is using it, it has no uncommitted changes, and its HEAD is
 already merged into the default branch. Git slots also refuse ignored files
-unless each is an authenticated seed whose regular-file bytes still match the
-current source in its owning checkout. This is checked during planning and again
+unless each is an authenticated seed matching what current seeding would write:
+regular-file bytes, including link-target text for a symbolic source. The source
+must lie outside the slot and pool after resolving parent links and must not
+share the slot file's inode; mode alone is not compared.
+This is checked during planning and again
 before deletion; concurrent writes after the last check are not protected.
 The ignored-file judgment does not cover jj slots or opted-in missing-repository
 orphans.

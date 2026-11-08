@@ -9,40 +9,53 @@ import (
 )
 
 func TestAcquire_ForeignReclamationPreservesModifiedSeed(t *testing.T) {
-	foreign, caller, poolDir := setupSharedClonePool(t)
-	for name, content := range map[string]string{
-		".gitignore":       "seed.ignored\n",
-		".worktreeinclude": "seed.ignored\n",
-		"seed.ignored":     "original\n",
-	} {
-		if err := os.WriteFile(filepath.Join(foreign, name), []byte(content), 0o640); err != nil {
-			t.Fatal(err)
-		}
-	}
-	runGit(t, foreign, "add", ".")
-	runGit(t, foreign, "commit", "-m", "seed fixture")
-	runGit(t, foreign, "push", "origin", "main")
-	slot, err := Acquire(foreign, poolDir, 1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clearOwnerReservation(t, poolDir, slot)
-	file := filepath.Join(slot, "seed.ignored")
-	if err := os.WriteFile(file, []byte("modified\n"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	before, err := ReadState(poolDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := acquireReclamationCaller(caller, poolDir, 1, false, true)
-	if err == nil || got != "" {
-		t.Errorf("foreign reclamation deleted a modified seed: %q (%v)", got, err)
-	}
-	assertFileContents(t, file, "modified\n")
-	after, err := ReadState(poolDir)
-	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Errorf("refusal changed registration: before=%+v after=%+v (%v)", before, after, err)
+	for _, scenario := range []string{"modified", "hardlink-source"} {
+		t.Run(scenario, func(t *testing.T) {
+			foreign, caller, poolDir := setupSharedClonePool(t)
+			for name, content := range map[string]string{
+				".gitignore":       "seed.ignored\n",
+				".worktreeinclude": "seed.ignored\n",
+				"seed.ignored":     "original\n",
+			} {
+				if err := os.WriteFile(filepath.Join(foreign, name), []byte(content), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runGit(t, foreign, "add", ".")
+			runGit(t, foreign, "commit", "-m", "seed fixture")
+			runGit(t, foreign, "push", "origin", "main")
+			slot, err := Acquire(foreign, poolDir, 1, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clearOwnerReservation(t, poolDir, slot)
+			file := filepath.Join(slot, "seed.ignored")
+			want := "modified\n"
+			if scenario == "hardlink-source" {
+				want = "original\n"
+				if err := os.Remove(file); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(filepath.Join(foreign, "seed.ignored"), file); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(file, []byte(want), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			before, err := ReadState(poolDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := acquireReclamationCaller(caller, poolDir, 1, false, true)
+			if err == nil || got != "" {
+				t.Errorf("foreign reclamation deleted a modified seed: %q (%v)", got, err)
+			}
+			assertFileContents(t, file, want)
+			after, err := ReadState(poolDir)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Errorf("refusal changed registration: before=%+v after=%+v (%v)", before, after, err)
+			}
+		})
 	}
 }
 
@@ -104,6 +117,20 @@ func TestPruneFinalCheckPreservesIgnoredFiles(t *testing.T) {
 			after, err := ReadState(poolDir)
 			if err != nil || !reflect.DeepEqual(before, after) {
 				t.Errorf("refusal changed registration or leaked reservation: before=%+v after=%+v (%v)", before, after, err)
+			}
+			if scenario == "unseeded" {
+				if err := os.Remove(file); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				write(target, "original\n")
+			}
+			retry, err := Prune(repo, poolDir, false, nil)
+			if err != nil || len(retry.Pruned) != 1 || len(retry.Skipped) != 0 {
+				t.Fatalf("resolved condition left stale reservation: %+v (%v)", retry, err)
+			}
+			if _, err := os.Stat(slot); !os.IsNotExist(err) {
+				t.Fatalf("retry did not remove slot: %v", err)
 			}
 		})
 	}

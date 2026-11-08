@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 )
 
 // FindMainRepoRoot returns the main repository root for the current working
@@ -719,15 +721,15 @@ func requireNoWorktreeOperation(gitDir string) error {
 
 // RequireCleanRemovalAllowed exposes the same removal judgment used by foreign
 // reclamation. Callers must recheck immediately before non-forced removal.
-func RequireCleanRemovalAllowed(repoRoot, worktreePath string, seededPaths []string) error {
+func RequireCleanRemovalAllowed(repoRoot, poolDir, worktreePath string, seededPaths []string) error {
 	headPath, err := gitPath(worktreePath, "HEAD")
 	if err != nil {
 		return fmt.Errorf("cannot verify worktree Git directory: %w", err)
 	}
-	return requireCleanRemovalAllowed(repoRoot, worktreePath, filepath.Dir(headPath), seededPaths)
+	return requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, filepath.Dir(headPath), seededPaths)
 }
 
-func requireCleanRemovalAllowed(repoRoot, worktreePath, gitDir string, seededPaths []string) error {
+func requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir string, seededPaths []string) error {
 	replacements, err := runGitRaw(worktreePath, "replace", "--list")
 	if err != nil {
 		return fmt.Errorf("cannot verify worktree replacement refs: %w", err)
@@ -762,9 +764,17 @@ func requireCleanRemovalAllowed(repoRoot, worktreePath, gitDir string, seededPat
 			return fmt.Errorf("cannot verify seeded ignored path (%s): %w", ignoredPaths[0], err)
 		}
 		defer destination.Close()
+		slotBoundary, err := pathidentity.Existing(worktreePath)
+		if err != nil {
+			return fmt.Errorf("cannot verify seeded source boundary: %w", err)
+		}
+		poolBoundary, err := pathidentity.Existing(poolDir)
+		if err != nil {
+			return fmt.Errorf("cannot verify seeded source boundary: %w", err)
+		}
 		var sourceBuffer, destinationBuffer [32 * 1024]byte
 		for _, name := range ignoredPaths {
-			equal, err := equalRegularSeedFiles(source, destination, filepath.FromSlash(name), sourceBuffer[:], destinationBuffer[:])
+			equal, err := equalSeedFiles(source, destination, filepath.FromSlash(name), slotBoundary, poolBoundary, sourceBuffer[:], destinationBuffer[:])
 			if err != nil {
 				return fmt.Errorf("cannot verify seeded ignored path (%s): %w", name, err)
 			}
@@ -839,19 +849,86 @@ func openRegularSeedFile(root *os.Root, name string) (*os.File, os.FileInfo, err
 	return file, opened, nil
 }
 
-func equalRegularSeedFiles(source, destination *os.Root, name string, sourceBuffer, destinationBuffer []byte) (bool, error) {
-	a, aInfo, err := openRegularSeedFile(source, name)
+// equalSeedFiles compares what real seeding would write now, not what a
+// symbolic source happens to reference. Seeding materializes link target text
+// as a regular file. Parent links are resolved and authenticated separately so
+// neither a source inside the pool nor a same-inode alias proves independence.
+func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBoundary string, sourceBuffer, destinationBuffer []byte) (bool, error) {
+	if !filepath.IsLocal(name) {
+		return false, fmt.Errorf("seed path is not local: %s", name)
+	}
+	parentPath, err := pathidentity.Existing(filepath.Dir(filepath.Join(source.Name(), name)))
 	if err != nil {
 		return false, err
 	}
-	defer a.Close()
+	for _, boundary := range []string{slotBoundary, poolBoundary} {
+		if !strings.EqualFold(filepath.VolumeName(boundary), filepath.VolumeName(parentPath)) {
+			continue // Canonical absolute paths on distinct volumes cannot overlap.
+		}
+		rel, err := filepath.Rel(boundary, parentPath)
+		if err != nil {
+			return false, err
+		}
+		if rel == "." || filepath.IsLocal(rel) {
+			return false, fmt.Errorf("seed source is inside slot or pool: %s", name)
+		}
+	}
+	parent, err := source.OpenRoot(filepath.Dir(name))
+	if err != nil {
+		return false, err
+	}
+	defer parent.Close()
+	resolvedInfo, err := os.Stat(parentPath)
+	if err != nil {
+		return false, err
+	}
+	parentInfo, err := parent.Stat(".")
+	if err != nil || !os.SameFile(resolvedInfo, parentInfo) {
+		return false, fmt.Errorf("seed source parent changed: %s", name)
+	}
+	base := filepath.Base(name)
+	aInfo, err := parent.Lstat(base)
+	if err != nil {
+		return false, err
+	}
 	b, bInfo, err := openRegularSeedFile(destination, name)
 	if err != nil {
 		return false, err
 	}
 	defer b.Close()
-	if aInfo.Size() != bInfo.Size() {
-		return false, nil
+	if os.SameFile(aInfo, bInfo) {
+		return false, fmt.Errorf("seed source shares the slot inode: %s", name)
+	}
+	var a io.Reader
+	switch {
+	case aInfo.Mode().IsRegular():
+		file, info, err := openRegularSeedFile(parent, base)
+		if err != nil {
+			return false, err
+		}
+		defer file.Close()
+		if os.SameFile(info, bInfo) {
+			return false, fmt.Errorf("seed source shares the slot inode: %s", name)
+		}
+		if info.Size() != bInfo.Size() {
+			return false, nil
+		}
+		a = file
+	case aInfo.Mode()&os.ModeSymlink != 0:
+		target, err := parent.Readlink(base)
+		if err != nil {
+			return false, err
+		}
+		after, err := parent.Lstat(base)
+		if err != nil || !os.SameFile(aInfo, after) {
+			return false, fmt.Errorf("seed source link changed: %s", name)
+		}
+		if int64(len(target)) != bInfo.Size() {
+			return false, nil
+		}
+		a = strings.NewReader(target)
+	default:
+		return false, fmt.Errorf("seed source is not a file or symbolic link: %s", name)
 	}
 	for {
 		nA, errA := io.ReadFull(a, sourceBuffer)
@@ -874,7 +951,7 @@ func equalRegularSeedFiles(source, destination *os.Root, name string, sourceBuff
 // RemoveLandedWorktree holds Git's HEAD lock through verification and clean
 // removal. Unlike prune's base-branch check, only live remote refs may protect
 // these commits: a branch in the clone being reclaimed is not a remote backup.
-func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, beforeRemove func() error) (err error) {
+func RemoveLandedWorktree(repoRoot, poolDir, worktreePath string, seededPaths []string, beforeRemove func() error) (err error) {
 	removing := false
 	defer func() {
 		if err != nil && !removing {
@@ -937,7 +1014,7 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, b
 	if err := requireNoWorktreeOperation(gitDir); err != nil {
 		return err
 	}
-	if err := requireCleanRemovalAllowed(repoRoot, worktreePath, gitDir, seededPaths); err != nil {
+	if err := requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir, seededPaths); err != nil {
 		return err
 	}
 
@@ -964,7 +1041,7 @@ func RemoveLandedWorktree(repoRoot, worktreePath string, seededPaths []string, b
 	if err := requireNoWorktreeOperation(gitDir); err != nil {
 		return err
 	}
-	if err := requireCleanRemovalAllowed(repoRoot, worktreePath, gitDir, seededPaths); err != nil {
+	if err := requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir, seededPaths); err != nil {
 		return err
 	}
 	current, err := openRootUnchanged(worktreePath, identity)

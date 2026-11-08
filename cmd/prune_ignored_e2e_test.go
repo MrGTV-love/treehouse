@@ -114,14 +114,14 @@ func TestPruneIgnoredFiles(t *testing.T) {
 					if err != nil || !bytes.Equal(sourceBytes, slotBytes) {
 						t.Fatalf("real get did not copy equal seed bytes: %v", err)
 					}
-					t.Logf("seed source mode=%v slot mode=%v; copied bytes=original\\n", sourceInfo.Mode(), slotInfo.Mode())
+					t.Logf("seed source mode=%v slot mode=%v; copied bytes=%q", sourceInfo.Mode(), slotInfo.Mode(), sourceBytes)
 					seededTime = slotInfo.ModTime()
 				}
 				reason := "seed.ignored"
 				switch scenario {
 				case "unseeded", "mixed-unseeded":
 					file = filepath.Join(slot, "unique.ignored")
-					reason = "unseeded ignored path (unique.ignored)"
+					reason = "unique.ignored"
 					write(file, "unique ignored payload\n")
 				case "modified-same-size", "mixed-modified":
 					write(file, "modified\n")
@@ -147,6 +147,17 @@ func TestPruneIgnoredFiles(t *testing.T) {
 						t.Fatal("hard-link fixture is not the same inode")
 					}
 				case "modified-equal-source-time":
+					// Align every seed, so an mtime-only mutant cannot hide the
+					// changed bytes behind an unrelated control's timestamp.
+					for _, name := range state.Worktrees[0].SeededPaths {
+						info, err := os.Stat(filepath.Join(repo, filepath.FromSlash(name)))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Chtimes(filepath.Join(slot, filepath.FromSlash(name)), info.ModTime(), info.ModTime()); err != nil {
+							t.Fatal(err)
+						}
+					}
 					write(file, "modified\n")
 					info, err := os.Stat(filepath.Join(repo, "seed.ignored"))
 					if err != nil {

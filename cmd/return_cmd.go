@@ -63,7 +63,8 @@ already resolves keeps resolving to exactly the same worktree.
                                     repository's pool.
 
 --all acts on every slot somebody is holding. It leaves alone a slot
-'treehouse status' reports 'available' (nothing to return) or 'damaged' (its
+'treehouse status' reports idle ('available', 'foreign-idle' or
+'unknown-reuse': nothing to return) or 'damaged' (its
 marker cannot be read, so 'treehouse destroy' - not return - is what removes
 it), and a slot reported 'you're here' that is otherwise parked, clean and
 quiet: standing in a slot is not holding it, and 'treehouse enter' promises not
@@ -194,14 +195,14 @@ func bulkReturnPreconditions(wt pool.WorktreeStatus) pool.ReleasePreconditions {
 
 // returnableStatus reports whether `return --all` acts on a slot in this state.
 //
-// Available is excluded because there is nothing to return: the slot is already
-// parked and a later `get` will hand it out. Damaged is excluded because its
+// Idle slots (available, foreign-idle, unknown-reuse) are excluded because there
+// is nothing to return: the slot is already parked. Damaged is excluded because its
 // marker is missing or unreadable, so neither the detach nor the reset a return
 // performs can be judged safe, and `destroy` - which `status` already spells out
 // for such a slot - is the verb that removes it. So is a slot reported
 // "you're here" that `pool.WorktreeStatus.HeldOnlyByCwd` marks as held by
 // nobody: it is parked, clean and quiet, and the caller's own shell standing in
-// it is the only reason it is not reported available. `treehouse enter` is
+// it is the only reason it is not reported idle. `treehouse enter` is
 // documented to leave pool state untouched, so resetting such a slot - and
 // counting it among the held worktrees returned - would break that promise.
 // Everything else (leased, in-use, dirty, unverified, and a "you're here" slot

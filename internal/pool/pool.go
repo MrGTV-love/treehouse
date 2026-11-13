@@ -1205,8 +1205,9 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 // length of the scan. A caller that acts on a row must pin the action to the
 // observed Reservation, as return --all does.
 // Idle clean slots are available only to their own clone (physical common
-// Git directory, as in acquire); foreign and unreadable identities report
-// StatusForeignIdle and StatusUnknownReuse. If the requester's identity cannot
+// Git directory and the backend the repository selects, as in acquire);
+// another clone's or another backend's slots report StatusForeignIdle and
+// unreadable identities StatusUnknownReuse. If the requester's identity cannot
 // be read, List returns the rows with an error, marking all otherwise available
 // rows StatusUnknownReuse. Reporting callers may render those rows before
 // surfacing the error. Reuse callers must not proceed on it; enter by name
@@ -1245,7 +1246,9 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 	cwd, _ := os.Getwd()
 	repoRoot, identityErr := vcs.FindMainRepoRoot()
 	var requester os.FileInfo
+	var wantFlavor string
 	if identityErr == nil {
+		wantFlavor = vcs.BackendNameFor(repoRoot)
 		requester, identityErr = acquisitionCommonGitDir(repoRoot)
 	} else {
 		repoRoot = cwd
@@ -1329,6 +1332,8 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 				ws.Status = StatusDirty
 			} else if identityErr != nil {
 				ws.Status = StatusUnknownReuse
+			} else if ws.Flavor != wantFlavor {
+				ws.Status = StatusForeignIdle
 			} else if candidate, err := acquisitionCommonGitDir(wt.Path); err != nil {
 				ws.Status = StatusUnknownReuse
 			} else if !os.SameFile(candidate, requester) {

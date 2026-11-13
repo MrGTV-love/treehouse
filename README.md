@@ -378,7 +378,7 @@ treehouse return --all
 # 🌳 Returned 2 of 2 held worktree(s); 0 skipped; 1 not held.
 ```
 
-Held means somebody has the slot: `leased`, `in-use`, `dirty`, `unverified`, and `you're here` when the slot is any of those underneath. Idle slots (`available`, `foreign-idle` and `unknown-reuse`) are left alone: they have no held claim to return, even when this clone cannot reuse them. A `damaged` slot's marker is missing or unreadable, so neither the detach nor the reset a return performs can be judged safe - `treehouse destroy`, which `status` spells out for such a slot, is what removes it. And a slot reported `you're here` that is otherwise parked, clean and quiet is held by nobody: your own shell standing in it is the only reason `status` does not call it available, and `treehouse enter` is documented to leave pool state untouched, so `--all` must not reset it either.
+Held means somebody has the slot: `leased`, `in-use`, `dirty`, `unverified`, and `you're here` when the slot is any of those underneath. Idle slots (`available`, `foreign-idle` and `unknown-reuse`) are left alone: they have no held claim to return, even when this clone cannot reuse them. A `damaged` slot's marker is missing or unreadable, so neither the detach nor the reset a return performs can be judged safe - `treehouse destroy`, which `status` spells out for such a slot, is what removes it. And a slot reported `you're here` that is otherwise parked, clean and quiet is held by nobody: your own shell standing in it is the only reason `status` does not call it idle (`available`, `foreign-idle` or `unknown-reuse`), and `treehouse enter` is documented to leave pool state untouched, so `--all` must not reset it either.
 
 Naming any of them explicitly still returns it, including a bare `treehouse return` from inside the slot you are standing in: the narrow target is a deliberate act, while the bulk one must not surprise.
 
@@ -567,8 +567,8 @@ clone. Existing non-idle classifications take precedence over clone identity:
 
 | Status | Slot state | Can `get` reuse it? |
 | --- | --- | --- |
-| `available` | Idle, clean, belongs to this clone | Yes, subject to acquisition's base/merge and safety checks |
-| `foreign-idle` | Idle, clean, belongs to another clone | No; shared-cap reclamation is a separate removal path |
+| `available` | Idle, clean, belongs to this clone and the backend it selects | Yes, subject to acquisition's base/merge and safety checks |
+| `foreign-idle` | Idle, clean, belongs to another clone or another backend | No; shared-cap reclamation is a separate removal path |
 | `unknown-reuse` | Idle, clean, clone identity unreadable | No |
 | `dirty` | Has uncommitted tracked or untracked work | No |
 | `in-use` | Has a live owner reservation or processes | No |
@@ -754,7 +754,7 @@ The backend is resolved on every command, and existing pool slots keep the flavo
 `destroy` and `prune` handle each slot by its own flavor (its `.git` or `.jj` marker), so a git worktree is still cleanly deregistered from git even after opting the repository into jj, and vice versa.
 A slot whose marker is missing entirely (a damaged slot) is never reused, reset, or detached; `treehouse status` reports it as `damaged` even when you are standing in it, `treehouse return <path>` only clears its lease (and [`--all` leaves it alone](#returning-everything-at-once)), `treehouse lease` still protects it but reports an empty `base_branch` rather than reading one through a fallback backend, `prune` reports it as unverifiable, and `treehouse destroy <path> --include-unlanded` removes it.
 `treehouse get` is flavor-aware too: it only reuses slots matching the backend the repository currently selects, and creates new slots with that backend, so a caller who opted in to jj is never handed a git worktree (or vice versa).
-Old-flavor slots stay in the pool untouched — `treehouse status` marks them and they count toward `max_trees` — until you migrate them: `treehouse destroy` the old slots and re-acquire with `treehouse get`.
+Old-flavor slots stay in the pool untouched — `treehouse status` marks them, reports an idle one as `foreign-idle` because `get` will not take it, and they count toward `max_trees` — until you migrate them: `treehouse destroy` the old slots and re-acquire with `treehouse get`.
 
 jj-backend notes:
 

@@ -492,6 +492,89 @@ func TestReturnAllUnreadableRequesterInsideOwnIdleSlot(t *testing.T) {
 	t.Logf("return stderr: %s", stderr)
 }
 
+// jjWorkspaceRootShim stands in for the jj executable, which these tests do
+// not require. It answers `jj workspace root` from the nearest .jj marker and
+// `jj git remote list` from the colocated Git origin, the two reads that pick
+// the pool and the requester identity; anything else fails.
+func jjWorkspaceRootShim(t *testing.T) string {
+	t.Helper()
+	shim := t.TempDir()
+	source := `package main
+import("fmt";"os";"os/exec";"path/filepath";"strings")
+func main(){
+ n:=len(os.Args)
+ if n>=4 && os.Args[n-3]=="git" && os.Args[n-2]=="remote" && os.Args[n-1]=="list" {
+  out,err:=exec.Command("git","--no-optional-locks","remote","get-url","origin").Output()
+  if err==nil { fmt.Println("origin",strings.TrimSpace(string(out))) }
+  return
+ }
+ if n<3 || os.Args[n-2]!="workspace" || os.Args[n-1]!="root" { fmt.Fprintln(os.Stderr,"jj shim: unsupported",os.Args[1:]); os.Exit(1) }
+ dir,_:=os.Getwd()
+ for { if info,err:=os.Stat(filepath.Join(dir,".jj"));err==nil&&info.IsDir() { fmt.Println(dir); return }
+  parent:=filepath.Dir(dir); if parent==dir { fmt.Fprintln(os.Stderr,"There is no jj repo in \".\""); os.Exit(1) }; dir=parent }
+}
+`
+	file := filepath.Join(shim, "jj.go")
+	if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name := "jj"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", filepath.Join(shim, name), file).CombinedOutput(); err != nil {
+		t.Fatalf("build jj shim: %s %v", out, err)
+	}
+	return shim
+}
+
+// A git-flavored idle slot of this very clone is not reusable once the
+// repository opts in to jj: acquire skips other-flavor slots, so status must
+// not call it available. The requester is made colocated by its .jj/repo
+// store directory beside its .git, which is what the flavor and main-root
+// readers inspect; real jj is not exercised.
+func TestStatusOtherFlavorIdleSlotIsForeignIdle(t *testing.T) {
+	own, home := setupTestRepo(t)
+	root := filepath.Join(home, "scratch-pool")
+	env := []string{"TREEHOUSE_ROOT=" + root}
+	out, stderr, code := runTreehouse(t, own, home, env, "get", "--lease", "--no-fetch", "--json")
+	if code != 0 {
+		t.Fatalf("construct git slot: %d %s", code, stderr)
+	}
+	var lease leaseJSONResult
+	if err := json.Unmarshal([]byte(out), &lease); err != nil {
+		t.Fatal(err)
+	}
+	poolDir, err := config.ResolvePoolDir(own, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Release(poolDir, lease.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(own, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statusOf := func(extra ...string) string {
+		t.Helper()
+		out, stderr, code := runTreehouse(t, own, home, append([]string{"TREEHOUSE_ROOT=" + root, "PATH=" + jjWorkspaceRootShim(t) + string(os.PathListSeparator) + os.Getenv("PATH")}, extra...), "status", "--json")
+		if code != 0 {
+			t.Fatalf("status: %d %s", code, stderr)
+		}
+		var rows []statusJSONResult
+		if err := json.Unmarshal([]byte(out), &rows); err != nil || len(rows) != 1 || rows[0].Path != lease.Path {
+			t.Fatalf("status rows: %v %s", err, out)
+		}
+		return rows[0].Status
+	}
+	if got := statusOf("TREEHOUSE_VCS=git"); got != "available" {
+		t.Fatalf("own git slot under git backend: %s, want available", got)
+	}
+	if got := statusOf("TREEHOUSE_VCS=jj"); got != "foreign-idle" {
+		t.Errorf("own git slot under jj-opted requester: %s, want foreign-idle", got)
+	}
+}
+
 func TestGetForeignRefusalReasons(t *testing.T) {
 	own, home := setupTestRepo(t)
 	foreign := filepath.Join(filepath.Dir(own), "other", filepath.Base(own))

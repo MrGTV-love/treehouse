@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -58,7 +59,10 @@ func enterRunE(cmd *cobra.Command, args []string) error {
 	}
 
 	worktrees, err := pool.List(poolDir)
-	if err != nil {
+	// A requester identity error leaves a valid membership listing. Entry
+	// selects an explicitly named member, not a reusable slot, so it does not
+	// depend on clone reuse identity. State/read failures return no listing.
+	if err != nil && !errors.Is(err, pool.ErrRequesterIdentity) {
 		return err
 	}
 

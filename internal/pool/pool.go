@@ -34,6 +34,11 @@ const (
 	StatusUnverified = "unverified"
 )
 
+// ErrRequesterIdentity accompanies a valid List snapshot when only the
+// requester's clone reuse identity is unreadable. It never denotes a state or
+// membership read failure.
+var ErrRequesterIdentity = errors.New("cannot verify requester clone identity")
+
 // WorktreeStatus describes one managed worktree as reported by List.
 type WorktreeStatus struct {
 	Name   string
@@ -1203,7 +1208,8 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 // StatusForeignIdle and StatusUnknownReuse. If the requester's identity cannot
 // be read, List returns the rows with an error, marking all otherwise available
 // rows StatusUnknownReuse. Reporting callers may render those rows before
-// surfacing the error; action callers must not proceed on that error.
+// surfacing the error. Reuse/bulk-reset callers must not proceed on it, but
+// an explicit membership-only reader (enter by name) can still use the rows.
 // Leased worktrees are reported with StatusLeased and their optional holder.
 // An idle slot whose .git/.jj marker is gone is reported StatusDamaged: its
 // dirtiness is never read, because dispatch on a markerless path falls back to
@@ -1244,7 +1250,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		repoRoot = cwd
 	}
 	if identityErr != nil {
-		identityErr = fmt.Errorf("cannot verify requester clone identity for %s: %w", repoRoot, identityErr)
+		identityErr = fmt.Errorf("%w for %s: %v", ErrRequesterIdentity, repoRoot, identityErr)
 	}
 	// A non-nil listing is still usable for reporting when requester identity
 	// is unreadable. Callers performing actions must honor the returned error.

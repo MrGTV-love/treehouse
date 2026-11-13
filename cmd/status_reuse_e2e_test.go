@@ -330,6 +330,26 @@ func TestStatusUnreadableRequester(t *testing.T) {
 			t.Errorf("%s: %s, want %s", row.Path, row.Status, want)
 		}
 	}
+	// Named entry is not acquisition: unreadable reuse identity must not
+	// remove the existing ability to enter a known pool member by name.
+	entered, enterErr, enterCode := f.run(t, f.own, identityFailureEnv(t, f.own, f.paths["R11"]), "enter", "--print-path", filepath.Base(filepath.Dir(f.paths["R4"])))
+	if enterCode != 0 || strings.TrimSpace(entered) != f.paths["R4"] {
+		t.Errorf("named entry must not depend on requester reuse identity: code=%d stdout=%q stderr=%q", enterCode, entered, enterErr)
+	}
+	// The new identity diagnostic must not mask a genuine membership/state
+	// failure. A directory at the state-file path deterministically fails reads
+	// even when the tests run with elevated filesystem privileges.
+	statePath := filepath.Join(f.poolDir, "treehouse-state.json")
+	if err := os.Rename(statePath, filepath.Join(f.home, "saved-state.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entered, enterErr, enterCode = f.run(t, f.own, nil, "enter", "--print-path", filepath.Base(filepath.Dir(f.paths["R4"])))
+	if enterCode == 0 || entered != "" || !strings.Contains(enterErr, "treehouse-state.json") {
+		t.Errorf("named entry lost fatal state-read refusal: code=%d stdout=%q stderr=%q", enterCode, entered, enterErr)
+	}
 	t.Logf("exit=%d stderr=%q json=%s", code, stderr, out)
 }
 

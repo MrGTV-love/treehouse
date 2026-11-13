@@ -312,7 +312,7 @@ func TestStatusUnreadableRequester(t *testing.T) {
 	if code == 0 {
 		t.Errorf("unreadable requester exited 0; stderr %q", stderr)
 	}
-	if strings.Count(strings.TrimSpace(stderr), "\n") != 0 || !strings.Contains(stderr, f.own) || !strings.Contains(stderr, "injected unreadable requester identity") {
+	if strings.Count(strings.TrimSpace(stderr), "\n") != 0 || !strings.Contains(filepath.ToSlash(stderr), filepath.ToSlash(f.own)) || !strings.Contains(stderr, "injected unreadable requester identity") {
 		t.Errorf("expected exactly one requester identity error: %q", stderr)
 	}
 	var rows []statusJSONResult
@@ -379,7 +379,8 @@ func TestReturnAllSkipsForeignAndUnknownIdle(t *testing.T) {
 	}
 	for _, id := range []string{"R8", "R9"} {
 		data, err := os.ReadFile(filepath.Join(f.paths[id], "README.md"))
-		if err != nil || string(data) != "hello\n" {
+		// Windows checkouts may convert line endings (core.autocrlf).
+		if err != nil || strings.ReplaceAll(string(data), "\r\n", "\n") != "hello\n" {
 			t.Errorf("dirty %s not returned: %q %v", id, data, err)
 		}
 	}
@@ -425,7 +426,8 @@ func (f reuseFixture) assertHeldReturned(t *testing.T) {
 	t.Helper()
 	for _, id := range []string{"R8", "R9"} {
 		data, err := os.ReadFile(filepath.Join(f.paths[id], "README.md"))
-		if err != nil || string(data) != "hello\n" {
+		// Windows checkouts may convert line endings (core.autocrlf).
+		if err != nil || strings.ReplaceAll(string(data), "\r\n", "\n") != "hello\n" {
 			t.Errorf("dirty %s not returned: %q %v", id, data, err)
 		}
 	}

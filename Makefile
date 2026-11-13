@@ -7,7 +7,7 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o treehouse .
 
 test:
-	go test -timeout 20m ./...
+	go test -timeout 30m ./...
 
 fmt:
 	gofmt -w .

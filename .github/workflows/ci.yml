@@ -51,7 +51,7 @@ jobs:
 
       - name: Test
         # Real Git integration fixtures need more than Go's default 10m on Windows.
-        run: go test -timeout 20m ./...
+        run: go test -timeout 30m ./...
 
       - name: Build
         run: go build -o treehouse${{ matrix.os == 'windows-latest' && '.exe' || '' }} .

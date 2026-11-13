@@ -11,7 +11,7 @@ make build
 make test
 ```
 
-`make test` and the Linux/macOS/Windows CI matrix run `go test -timeout 20m ./...`.
+`make test` and the Linux/macOS/Windows CI matrix run `go test -timeout 30m ./...`.
 The explicit per-package timeout accommodates real Git integration fixtures on
 Windows, where the full suite can exceed Go's default 10-minute limit.
 

@@ -112,5 +112,15 @@ func parentPID(pid int32) (int32, error) {
 	if err != nil {
 		return 0, err
 	}
-	return proc.Ppid()
+	parent, err := proc.Ppid()
+	if err != nil {
+		// The process can exit between the existence check above and the
+		// parent read (on Windows the read reports "couldn't find pid").
+		// Report that as not running only when a fresh check proves it gone.
+		if exists, existsErr := gopsutilprocess.PidExists(pid); existsErr == nil && !exists {
+			return 0, gopsutilprocess.ErrorProcessNotRunning
+		}
+		return 0, err
+	}
+	return parent, nil
 }

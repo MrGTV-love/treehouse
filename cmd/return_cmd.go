@@ -257,8 +257,15 @@ func returnHeldWorktrees() error {
 	}
 
 	worktrees, err := pool.List(poolDir)
+	// An unreadable requester identity still leaves a valid listing: its idle
+	// rows are unknown-reuse, which returnableStatus never selects, and the
+	// held statuses do not depend on clone identity. State/read failures
+	// return no listing and stay fatal.
 	if err != nil {
-		return err
+		if !errors.Is(err, pool.ErrRequesterIdentity) {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "treehouse: %v; idle slots are left alone.\n", err)
 	}
 
 	var targets []pool.WorktreeStatus

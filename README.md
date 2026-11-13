@@ -764,6 +764,7 @@ jj-backend notes:
 - Merge detection uses ancestry; squash-merged work is treated as unmerged, so lifecycle commands err on the side of keeping it.
 - The default branch resolves to the `main`/`master`/`trunk` bookmark, preferring origin.
 - A pooled jj workspace whose backing repository was deleted is classified as an orphan just like a git worktree: `prune` reports it, and `prune --prune-orphans --yes` reclaims it.
+- In a `.jj`-only (non-colocated) repository the caller's clone identity cannot be read, so `treehouse status` reports every idle slot as `unknown-reuse`, prints one line naming the unreadable identity, and exits nonzero. `treehouse return --all` still returns the held slots (leased, in-use, dirty, unverified) and exits 0; it leaves every idle slot alone, including the one you stand in.
 
 ### Worktree root
 

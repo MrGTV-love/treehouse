@@ -78,7 +78,8 @@ type WorktreeStatus struct {
 	RecoveryBackup string
 	// HeldOnlyByCwd reports a StatusHere slot that nobody is actually holding:
 	// it is unleased, idle, clean, quiet and undamaged, and the only reason it
-	// is not reported available is that the caller is standing in it. Status
+	// is not reported idle (available, foreign-idle or unknown-reuse) is that
+	// the caller is standing in it. Status
 	// alone cannot answer that, because StatusHere hides whichever
 	// classification the slot would otherwise have carried.
 	HeldOnlyByCwd bool
@@ -1208,8 +1209,8 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 // StatusForeignIdle and StatusUnknownReuse. If the requester's identity cannot
 // be read, List returns the rows with an error, marking all otherwise available
 // rows StatusUnknownReuse. Reporting callers may render those rows before
-// surfacing the error. Reuse/bulk-reset callers must not proceed on it, but
-// an explicit membership-only reader (enter by name) can still use the rows.
+// surfacing the error. Reuse callers must not proceed on it; enter by name
+// and return --all, which acts only on held rows, can still use the rows.
 // Leased worktrees are reported with StatusLeased and their optional holder.
 // An idle slot whose .git/.jj marker is gone is reported StatusDamaged: its
 // dirtiness is never read, because dispatch on a markerless path falls back to
@@ -1341,7 +1342,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		// readable. The recovery-scan case below already forces damaged
 		// back over the overlay for exactly this reason.
 		if !wt.Leased && !owned && ws.Status != StatusDamaged && process.WorktreeContainsCwd(wt.Path, cwd) {
-			ws.HeldOnlyByCwd = ws.Status == StatusAvailable
+			ws.HeldOnlyByCwd = ws.Status == StatusAvailable || ws.Status == StatusForeignIdle || ws.Status == StatusUnknownReuse
 			ws.Status = StatusHere
 		}
 

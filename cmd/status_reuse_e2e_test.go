@@ -410,6 +410,88 @@ func TestReturnAllSkipsForeignAndUnknownIdle(t *testing.T) {
 	t.Logf("second return stderr: %s", stderr)
 }
 
+func (f reuseFixture) branchOf(t *testing.T, id string) string {
+	t.Helper()
+	cmd := exec.Command("git", "--no-optional-locks", "branch", "--show-current")
+	cmd.Dir = f.paths[id]
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("read %s branch: %v", id, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (f reuseFixture) assertHeldReturned(t *testing.T) {
+	t.Helper()
+	for _, id := range []string{"R8", "R9"} {
+		data, err := os.ReadFile(filepath.Join(f.paths[id], "README.md"))
+		if err != nil || string(data) != "hello\n" {
+			t.Errorf("dirty %s not returned: %q %v", id, data, err)
+		}
+	}
+	state, err := pool.ReadState(f.poolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wt := range state.Worktrees {
+		if wt.Leased || wt.OwnerPID != 0 {
+			t.Errorf("held claim not returned: %s", wt.Name)
+		}
+	}
+	if inUse, err := process.IsWorktreeInUse(f.paths["R6"]); err != nil || inUse {
+		t.Errorf("live process slot not returned: inUse=%v error=%v", inUse, err)
+	}
+}
+
+// An unreadable requester identity (as in a .jj-only repository) must not stop
+// return --all from returning held slots, and must not make idle slots targets.
+func TestReturnAllUnreadableRequesterReturnsHeld(t *testing.T) {
+	f := newReuseFixture(t)
+	for _, id := range []string{"R1", "R4", "R11"} {
+		gitCmd(t, f.paths[id], "checkout", "-b", "keep-"+id)
+	}
+	unreadable := identityFailureEnv(t, f.own, f.paths["R11"])
+	out, stderr, code := f.run(t, f.own, unreadable, "return", "--all", "--force")
+	if code != 0 {
+		t.Fatalf("return --all with unreadable requester: %d %s %s", code, out, stderr)
+	}
+	for _, id := range []string{"R1", "R4", "R11"} {
+		if got := f.branchOf(t, id); got != "keep-"+id {
+			t.Errorf("idle %s slot reset: branch %q", id, got)
+		}
+	}
+	f.assertHeldReturned(t)
+	t.Logf("return stderr: %s", stderr)
+
+	statePath := filepath.Join(f.poolDir, "treehouse-state.json")
+	if err := os.Rename(statePath, filepath.Join(f.home, "saved-state.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code = f.run(t, f.own, unreadable, "return", "--all", "--force")
+	if code == 0 || !strings.Contains(stderr, "treehouse-state.json") {
+		t.Errorf("return --all lost fatal state-read refusal: code=%d stderr=%q", code, stderr)
+	}
+}
+
+// Standing in one's own idle slot while the requester identity is unreadable
+// shows that slot as "you're here" over unknown-reuse; it must not be reset.
+func TestReturnAllUnreadableRequesterInsideOwnIdleSlot(t *testing.T) {
+	f := newReuseFixture(t)
+	gitCmd(t, f.paths["R1"], "checkout", "-b", "keep-R1")
+	_, stderr, code := f.run(t, f.paths["R1"], identityFailureEnv(t, f.own, f.paths["R11"]), "return", "--all", "--force")
+	if code != 0 {
+		t.Fatalf("return --all inside own slot: %d %s", code, stderr)
+	}
+	if got := f.branchOf(t, "R1"); got != "keep-R1" {
+		t.Errorf("own idle slot reset from inside it: branch %q; stderr %s", got, stderr)
+	}
+	f.assertHeldReturned(t)
+	t.Logf("return stderr: %s", stderr)
+}
+
 func TestGetForeignRefusalReasons(t *testing.T) {
 	own, home := setupTestRepo(t)
 	foreign := filepath.Join(filepath.Dir(own), "other", filepath.Base(own))

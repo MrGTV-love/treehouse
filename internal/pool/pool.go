@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kunchenguid/treehouse/v3/internal/hooks"
@@ -17,12 +18,14 @@ import (
 )
 
 const (
-	StatusAvailable = "available"
-	StatusDirty     = "dirty"
-	StatusInUse     = "in-use"
-	StatusLeased    = "leased"
-	StatusHere      = "you're here"
-	StatusDamaged   = "damaged"
+	StatusAvailable    = "available"
+	StatusForeignIdle  = "foreign-idle"
+	StatusUnknownReuse = "unknown-reuse"
+	StatusDirty        = "dirty"
+	StatusInUse        = "in-use"
+	StatusLeased       = "leased"
+	StatusHere         = "you're here"
+	StatusDamaged      = "damaged"
 	// StatusUnverified is a slot whose process table could not be read: the
 	// question "is anything running here?" has no answer, so nothing decided
 	// from the process list (in-use) or from its absence (damaged, dirty,
@@ -681,24 +684,29 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			return nil
 		}
 
-		// No available worktree — create new if pool allows
+		// No available worktree - create new if pool allows.
+		var reclaimDetails string
 		if len(state.Worktrees) == poolSize && identityErr == nil && wantFlavor == "git" {
-			if err := reclaimForeignWorktree(poolDir, &state, commonDir, opts.skipFetch); err != nil {
+			refusals, err := reclaimForeignWorktree(poolDir, &state, commonDir, opts.skipFetch)
+			if err != nil {
 				return err
+			}
+			if len(refusals) > 0 {
+				reclaimDetails = ". Reclamation skipped: " + strings.Join(refusals, "; ")
 			}
 		}
 		if len(state.Worktrees) >= poolSize {
 			if otherFlavor > 0 {
-				return fmt.Errorf("all %d worktrees are in use, dirty, or hold the other backend's worktrees (%d %s-flavored; the repository selects %s). Run 'treehouse status' to see details, destroy old-flavor worktrees to migrate the pool, or increase max_trees in treehouse.toml", len(state.Worktrees), otherFlavor, map[string]string{"git": "jj", "jj": "git"}[wantFlavor], wantFlavor)
+				return fmt.Errorf("all %d worktrees are in use, dirty, or hold the other backend's worktrees (%d %s-flavored; the repository selects %s)%s. Run 'treehouse status' to see details, destroy old-flavor worktrees to migrate the pool, or increase max_trees in treehouse.toml", len(state.Worktrees), otherFlavor, map[string]string{"git": "jj", "jj": "git"}[wantFlavor], wantFlavor, reclaimDetails)
 			}
 			if otherClone > 0 || unverifiedClone > 0 {
 				msg := fmt.Sprintf("all %d worktrees are in use, dirty, or not provably this clone's (%d belong to another clone; %d whose clone identity cannot be verified; max_trees = %d). A worktree is reused only by the clone it belongs to", len(state.Worktrees), otherClone, unverifiedClone, poolSize)
 				if identityErr != nil {
 					msg += fmt.Sprintf(", and this repository's clone identity cannot be verified: %v", identityErr)
 				}
-				return fmt.Errorf("%s. Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", msg)
+				return fmt.Errorf("%s%s. Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", msg, reclaimDetails)
 			}
-			return fmt.Errorf("all %d worktrees are in use or dirty (max_trees = %d). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", len(state.Worktrees), poolSize)
+			return fmt.Errorf("all %d worktrees are in use or dirty (max_trees = %d)%s. Run 'treehouse status' to see details, or increase max_trees in treehouse.toml", len(state.Worktrees), poolSize, reclaimDetails)
 		}
 
 		if opts.worktreePath != "" {
@@ -1190,6 +1198,12 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 // get, return, or prune. A row can therefore be older than the state by the
 // length of the scan. A caller that acts on a row must pin the action to the
 // observed Reservation, as return --all does.
+// Idle clean slots are available only to their own clone (physical common
+// Git directory, as in acquire); foreign and unreadable identities report
+// StatusForeignIdle and StatusUnknownReuse. If the requester's identity cannot
+// be read, List returns the rows with an error, marking all otherwise available
+// rows StatusUnknownReuse. Reporting callers may render those rows before
+// surfacing the error; action callers must not proceed on that error.
 // Leased worktrees are reported with StatusLeased and their optional holder.
 // An idle slot whose .git/.jj marker is gone is reported StatusDamaged: its
 // dirtiness is never read, because dispatch on a markerless path falls back to
@@ -1222,7 +1236,19 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 	}
 
 	cwd, _ := os.Getwd()
-	var result []WorktreeStatus
+	repoRoot, identityErr := vcs.FindMainRepoRoot()
+	var requester os.FileInfo
+	if identityErr == nil {
+		requester, identityErr = acquisitionCommonGitDir(repoRoot)
+	} else {
+		repoRoot = cwd
+	}
+	if identityErr != nil {
+		identityErr = fmt.Errorf("cannot verify requester clone identity for %s: %w", repoRoot, identityErr)
+	}
+	// A non-nil listing is still usable for reporting when requester identity
+	// is unreadable. Callers performing actions must honor the returned error.
+	result := make([]WorktreeStatus, 0, len(state.Worktrees))
 	for _, wt := range state.Worktrees {
 		if wt.Destroying {
 			continue
@@ -1294,6 +1320,12 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		default:
 			if dirty, _ := vcs.IsDirty(wt.Path); dirty {
 				ws.Status = StatusDirty
+			} else if identityErr != nil {
+				ws.Status = StatusUnknownReuse
+			} else if candidate, err := acquisitionCommonGitDir(wt.Path); err != nil {
+				ws.Status = StatusUnknownReuse
+			} else if !os.SameFile(candidate, requester) {
+				ws.Status = StatusForeignIdle
 			}
 		}
 		// Damaged is not overlaid. A missing marker is a different kind of
@@ -1321,7 +1353,7 @@ func List(poolDir string) ([]WorktreeStatus, error) {
 		result = append(result, ws)
 	}
 
-	return result, nil
+	return result, identityErr
 }
 
 // FindByName returns the pool entry registered under name, or nil when this

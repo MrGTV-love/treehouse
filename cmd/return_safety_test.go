@@ -6,8 +6,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/treehouse/v3/internal/pool"
 	"github.com/kunchenguid/treehouse/v3/internal/process"
 )
+
+func TestReturnableStatusRejectsUnknownAndIdle(t *testing.T) {
+	for _, status := range []string{"available", "foreign-idle", "unknown-reuse", "damaged", "future-status", ""} {
+		if returnableStatus(pool.WorktreeStatus{Status: status}) {
+			t.Errorf("bulk return accepts %q", status)
+		}
+	}
+	for _, status := range []string{"dirty", "in-use", "leased", "unverified", "you're here"} {
+		if !returnableStatus(pool.WorktreeStatus{Status: status}) {
+			t.Errorf("bulk return no longer accepts held %q", status)
+		}
+	}
+	if returnableStatus(pool.WorktreeStatus{Status: "you're here", HeldOnlyByCwd: true}) {
+		t.Error("bulk return accepts cwd-only slot")
+	}
+}
 
 // A worktree that still has a foreign live writer after termination must not be
 // handed back to the pool. The point-in-time termination scan misses a process

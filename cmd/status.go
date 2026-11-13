@@ -58,14 +58,17 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 
-		worktrees, err := pool.List(poolDir)
-		if err != nil {
-			return err
+		worktrees, listErr := pool.List(poolDir)
+		if listErr != nil && worktrees == nil {
+			return listErr
 		}
 		repoFlavor := vcs.BackendNameFor(repoRoot)
 
 		if statusJSON {
-			return writeStatusJSON(worktrees)
+			if err := writeStatusJSON(worktrees); err != nil {
+				return err
+			}
+			return listErr
 		}
 
 		green := color.New(color.FgGreen).SprintFunc()
@@ -77,22 +80,29 @@ var statusCmd = &cobra.Command{
 		fmt.Fprintln(os.Stdout, baseBranchLine(repoRoot, cfg, yellow))
 
 		if len(worktrees) == 0 {
-			fmt.Fprintln(os.Stderr, "🌳 No worktrees in pool.")
-			return nil
+			if listErr == nil {
+				fmt.Fprintln(os.Stderr, "🌳 No worktrees in pool.")
+			}
+			return listErr
 		}
 
-		// statusWidth must be >= longest status string ("you're here" = 11;
-		// "unverified" = 10)
-		const statusWidth = 11
+		// Preserve the existing layout for old values, widening only when a
+		// longer status is present. Padding follows the plain (uncolored) text.
+		statusWidth := 11
+		for _, wt := range worktrees {
+			if len(wt.Status) > statusWidth {
+				statusWidth = len(wt.Status)
+			}
+		}
 
 		for _, wt := range worktrees {
-			var status string
+			status := wt.Status
 			switch wt.Status {
 			case pool.StatusAvailable:
 				status = green(wt.Status)
 			case pool.StatusInUse:
 				status = red(wt.Status)
-			case pool.StatusDirty:
+			case pool.StatusDirty, pool.StatusForeignIdle, pool.StatusUnknownReuse:
 				status = yellow(wt.Status)
 			case pool.StatusLeased:
 				status = magenta(wt.Status)
@@ -104,7 +114,7 @@ var statusCmd = &cobra.Command{
 				status = red(wt.Status)
 			}
 
-			// "%-4s  %-11s  " = 4 + 2 + 11 + 2 = 19 chars before path
+			// Names and uncolored statuses share fixed columns before the path.
 			statusPad := strings.Repeat(" ", statusWidth-len(wt.Status))
 			line := fmt.Sprintf("%-4s  %s%s  %s", wt.Name, status, statusPad, ui.PrettyPath(wt.Path))
 			if wt.Branch != "" {
@@ -145,7 +155,7 @@ var statusCmd = &cobra.Command{
 				fmt.Fprintf(os.Stdout, "%s%s\n", strings.Repeat(" ", 4+2+statusWidth+2), strings.Join(procStrs, ", "))
 			}
 		}
-		return nil
+		return listErr
 	},
 }
 

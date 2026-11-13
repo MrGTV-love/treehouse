@@ -2,6 +2,8 @@ package pool
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -9,7 +11,32 @@ import (
 	"time"
 
 	"github.com/kunchenguid/treehouse/v3/internal/process"
+	"github.com/kunchenguid/treehouse/v3/internal/vcs"
 )
+
+// R14: a foreign clone identity is not evidence of an idle slot when the
+// process table is unreadable. Use the existing scanner fault boundary.
+func TestListForeignUnreadableProcessTable(t *testing.T) {
+	foreign, own, dir := setupSharedClonePool(t)
+	path := filepath.Join(dir, "1", filepath.Base(foreign))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := vcs.AddWorktree(foreign, path, "main"); err != nil {
+		t.Fatal(err)
+	}
+	entry := WorktreeEntry{Name: "1", Path: path}
+	setSeedInventory(&entry, nil, true)
+	if err := WriteState(dir, State{Worktrees: []WorktreeEntry{entry}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(own)
+	restore := swapListProcessSeams(func(string) ([]process.ProcessInfo, error) {
+		return nil, errors.New("injected unreadable process table")
+	}, func(p []process.ProcessInfo) ([]process.ProcessInfo, error) { return p, nil })
+	t.Cleanup(restore)
+	assertSingleStatus(t, dir, StatusUnverified)
+}
 
 // Block only the status scan; lifecycle operations still get an immediate,
 // successful process-table read. Cleanup always releases and joins List before

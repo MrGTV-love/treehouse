@@ -204,7 +204,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 | `enter`   | `--print-path` | Print only the worktree's absolute path to stdout instead of opening a subshell (for `cd "$(treehouse enter --print-path 1)"`) |
 | `status`  | `--json` | Print worktree status and lease metadata as JSON |
 | `return`  | `--force` | Clean, reset, and return without prompting |
-| `return`  | `--all`   | Return every held worktree in this repository's pool; leaves alone slots `status` reports `available` or `damaged`, and a `you're here` slot nobody else holds |
+| `return`  | `--all`   | Return every held worktree in this repository's pool; leaves alone slots `status` reports `available`, `foreign-idle`, `unknown-reuse` or `damaged`, and a `you're here` slot nobody else holds |
 | `return`  | `--if-lease-id` | Return only if the current lease has the expected per-acquisition identity |
 | `return`  | `--if-lease-holder` | Return only if the current lease has the expected holder |
 | `prune`   | `--yes`   | Delete listed prune candidates instead of doing a dry run |
@@ -378,7 +378,7 @@ treehouse return --all
 # 🌳 Returned 2 of 2 held worktree(s); 0 skipped; 1 not held.
 ```
 
-Held means somebody has the slot: `leased`, `in-use`, `dirty`, `unverified`, and `you're here` when the slot is any of those underneath. Three kinds of slot are left alone. An `available` slot has nothing to return. A `damaged` slot's marker is missing or unreadable, so neither the detach nor the reset a return performs can be judged safe - `treehouse destroy`, which `status` spells out for such a slot, is what removes it. And a slot reported `you're here` that is otherwise parked, clean and quiet is held by nobody: your own shell standing in it is the only reason `status` does not call it available, and `treehouse enter` is documented to leave pool state untouched, so `--all` must not reset it either.
+Held means somebody has the slot: `leased`, `in-use`, `dirty`, `unverified`, and `you're here` when the slot is any of those underneath. Idle slots (`available`, `foreign-idle` and `unknown-reuse`) are left alone: they have no held claim to return, even when this clone cannot reuse them. A `damaged` slot's marker is missing or unreadable, so neither the detach nor the reset a return performs can be judged safe - `treehouse destroy`, which `status` spells out for such a slot, is what removes it. And a slot reported `you're here` that is otherwise parked, clean and quiet is held by nobody: your own shell standing in it is the only reason `status` does not call it idle (`available`, `foreign-idle` or `unknown-reuse`), and `treehouse enter` is documented to leave pool state untouched, so `--all` must not reset it either.
 
 Naming any of them explicitly still returns it, including a bare `treehouse return` from inside the slot you are standing in: the narrow target is a deliberate act, while the bulk one must not surprise.
 
@@ -561,6 +561,27 @@ symlink aliases and differently cased paths on a case-insensitive filesystem
 identify the same clone. If either identity cannot be proven, the slot is not
 reused. Non-colocated jj workspaces have no usable Git common directory, so
 they are never reused; fresh allocation below the cap still works.
+
+`treehouse status` and `status --json` report availability relative to the calling
+clone. Existing non-idle classifications take precedence over clone identity:
+
+| Status | Slot state | Can `get` reuse it? |
+| --- | --- | --- |
+| `available` | Idle, clean, belongs to this clone and the backend it selects | Yes, subject to acquisition's base/merge and safety checks |
+| `foreign-idle` | Idle, clean, belongs to another clone or another backend | No; shared-cap reclamation is a separate removal path |
+| `unknown-reuse` | Idle, clean, clone identity unreadable | No |
+| `dirty` | Has uncommitted tracked or untracked work | No |
+| `in-use` | Has a live owner reservation or processes | No |
+| `leased` | Has a durable lease, even without processes | No |
+| `you're here` | Caller is standing in it; leases and owners still take precedence | No while the caller is there |
+| `damaged` | Its own VCS marker is missing or unreadable | No |
+| `unverified` | Process table could not be read | Not proven idle; this status does not authorize reuse |
+
+An unreadable slot identity affects only that row (`unknown-reuse`) and does not
+fail `status`. An unreadable **requester** identity marks every otherwise idle
+row `unknown-reuse`; the listing is still printed (including the JSON array),
+but the command exits nonzero with one identity diagnostic on stderr.
+
 If no slot is safe to reuse, `get` creates one when the pool's total is below
 the calling clone's effective `max_trees`. At exactly the cap, a Git acquisition
 with a proven clone identity first attempts to remove one provably disposable
@@ -573,7 +594,9 @@ clone that uses Git's reftable ref storage are never candidates either. A failed
 operation-state or remote-landing check means leave the slot alone. A local
 base branch or stale remote-tracking ref is not sufficient deletion evidence.
 If no foreign slot qualifies, or the pool is already above the effective cap,
-acquisition fails. Reuse of a safe own-clone slot still works at the cap.
+acquisition fails. When reclamation at the cap skips every candidate, the error
+lists each slot's first refusal reason (for example a held `HEAD.lock` or an
+unseeded ignored path). Reuse of a safe own-clone slot still works at the cap.
 
 Automatic reclamation removes the old checkout using Git's non-forced
 clean-worktree removal. Ignored files may be deleted only when every path is
@@ -731,7 +754,7 @@ The backend is resolved on every command, and existing pool slots keep the flavo
 `destroy` and `prune` handle each slot by its own flavor (its `.git` or `.jj` marker), so a git worktree is still cleanly deregistered from git even after opting the repository into jj, and vice versa.
 A slot whose marker is missing entirely (a damaged slot) is never reused, reset, or detached; `treehouse status` reports it as `damaged` even when you are standing in it, `treehouse return <path>` only clears its lease (and [`--all` leaves it alone](#returning-everything-at-once)), `treehouse lease` still protects it but reports an empty `base_branch` rather than reading one through a fallback backend, `prune` reports it as unverifiable, and `treehouse destroy <path> --include-unlanded` removes it.
 `treehouse get` is flavor-aware too: it only reuses slots matching the backend the repository currently selects, and creates new slots with that backend, so a caller who opted in to jj is never handed a git worktree (or vice versa).
-Old-flavor slots stay in the pool untouched — `treehouse status` marks them and they count toward `max_trees` — until you migrate them: `treehouse destroy` the old slots and re-acquire with `treehouse get`.
+Old-flavor slots stay in the pool untouched — `treehouse status` marks them, reports an idle one as `foreign-idle` because `get` will not take it, and they count toward `max_trees` — until you migrate them: `treehouse destroy` the old slots and re-acquire with `treehouse get`.
 
 jj-backend notes:
 
@@ -741,6 +764,7 @@ jj-backend notes:
 - Merge detection uses ancestry; squash-merged work is treated as unmerged, so lifecycle commands err on the side of keeping it.
 - The default branch resolves to the `main`/`master`/`trunk` bookmark, preferring origin.
 - A pooled jj workspace whose backing repository was deleted is classified as an orphan just like a git worktree: `prune` reports it, and `prune --prune-orphans --yes` reclaims it.
+- In a `.jj`-only (non-colocated) repository the caller's clone identity cannot be read, so `treehouse status` reports every idle slot as `unknown-reuse`, prints one line naming the unreadable identity, and exits nonzero. `treehouse return --all` still returns the held slots (leased, in-use, dirty, unverified) and exits 0; it leaves every idle slot alone, including the one you stand in.
 
 ### Worktree root
 

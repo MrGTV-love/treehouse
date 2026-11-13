@@ -78,6 +78,7 @@ func entryFor(t *testing.T, poolDir, path string) WorktreeEntry {
 // for Acquire to hand out.
 func TestUpgrade_AdoptsPre30State(t *testing.T) {
 	repoDir, poolDir := setupLocalRepo(t)
+	t.Chdir(repoDir)
 	paths := idleSlots(t, repoDir, poolDir, 2)
 	idle, leased := paths[0], paths[1]
 	created := time.Now().Add(-48 * time.Hour).Round(0)
@@ -129,6 +130,7 @@ func TestUpgrade_AdoptsPre30State(t *testing.T) {
 // quarantine the pool.
 func TestUpgrade_AdoptsTwoXRewriteBesideKey(t *testing.T) {
 	repoDir, poolDir := setupLocalRepo(t)
+	t.Chdir(repoDir)
 	paths := idleSlots(t, repoDir, poolDir, 2)
 	first, second := paths[0], paths[1]
 	created := time.Now().Add(-48 * time.Hour).Round(0)

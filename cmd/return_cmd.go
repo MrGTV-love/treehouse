@@ -63,7 +63,8 @@ already resolves keeps resolving to exactly the same worktree.
                                     repository's pool.
 
 --all acts on every slot somebody is holding. It leaves alone a slot
-'treehouse status' reports 'available' (nothing to return) or 'damaged' (its
+'treehouse status' reports idle ('available', 'foreign-idle' or
+'unknown-reuse': nothing to return) or 'damaged' (its
 marker cannot be read, so 'treehouse destroy' - not return - is what removes
 it), and a slot reported 'you're here' that is otherwise parked, clean and
 quiet: standing in a slot is not holding it, and 'treehouse enter' promises not
@@ -194,19 +195,20 @@ func bulkReturnPreconditions(wt pool.WorktreeStatus) pool.ReleasePreconditions {
 
 // returnableStatus reports whether `return --all` acts on a slot in this state.
 //
-// Available is excluded because there is nothing to return: the slot is already
-// parked and a later `get` will hand it out. Damaged is excluded because its
+// Idle slots (available, foreign-idle, unknown-reuse) are excluded because there
+// is nothing to return: the slot is already parked. Damaged is excluded because its
 // marker is missing or unreadable, so neither the detach nor the reset a return
 // performs can be judged safe, and `destroy` - which `status` already spells out
 // for such a slot - is the verb that removes it. So is a slot reported
 // "you're here" that `pool.WorktreeStatus.HeldOnlyByCwd` marks as held by
 // nobody: it is parked, clean and quiet, and the caller's own shell standing in
-// it is the only reason it is not reported available. `treehouse enter` is
+// it is the only reason it is not reported idle. `treehouse enter` is
 // documented to leave pool state untouched, so resetting such a slot - and
 // counting it among the held worktrees returned - would break that promise.
 // Everything else (leased, in-use, dirty, unverified, and a "you're here" slot
 // that is any of those underneath) is a slot somebody is holding, which is
-// exactly what a bulk return exists to reclaim.
+// exactly what a bulk return exists to reclaim. Only known held statuses
+// qualify; foreign-idle, unknown-reuse and unrecognized values fail closed.
 //
 // That is deliberately WIDER than the other bulk verbs: prune skips a leased
 // slot and destroy removes one only when its exact path is named with
@@ -223,10 +225,12 @@ func returnableStatus(wt pool.WorktreeStatus) bool {
 		return false
 	}
 	switch wt.Status {
-	case pool.StatusAvailable, pool.StatusDamaged:
-		return false
-	default:
+	case pool.StatusDirty, pool.StatusInUse, pool.StatusLeased, pool.StatusHere, pool.StatusUnverified:
 		return true
+	default:
+		// Idle (available, foreign-idle, unknown-reuse), damaged, and any
+		// unrecognized status provide no claim for a bulk return to clear.
+		return false
 	}
 }
 
@@ -243,8 +247,8 @@ func returnableStatus(wt pool.WorktreeStatus) bool {
 // every retry forever. A run where every slot was skipped still exits 0:
 // nothing it set out to return was still there to return.
 //
-// A slot nobody holds - available, damaged, or one the caller merely stands
-// in - is never a target at all and is counted separately. A recovered slot
+// A slot nobody holds - available, foreign-idle, unknown-reuse, damaged, or
+// one the caller merely stands in - is never a target and is counted separately. A recovered slot
 // is a persistent quarantine (including a 3.0.0 upgrade quarantine); it is
 // counted held and skipped, and only a named return releases it.
 func returnHeldWorktrees() error {
@@ -254,8 +258,15 @@ func returnHeldWorktrees() error {
 	}
 
 	worktrees, err := pool.List(poolDir)
+	// An unreadable requester identity still leaves a valid listing: its idle
+	// rows are unknown-reuse, which returnableStatus never selects, and the
+	// held statuses do not depend on clone identity. State/read failures
+	// return no listing and stay fatal.
 	if err != nil {
-		return err
+		if !errors.Is(err, pool.ErrRequesterIdentity) {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "treehouse: %v; idle slots are left alone.\n", err)
 	}
 
 	var targets []pool.WorktreeStatus

@@ -303,6 +303,7 @@ func TestAcquireSkipsRecoveredEntry(t *testing.T) {
 // slot must be allocatable.
 func TestNamedReturnReleasesRecoveredEntryForReuse(t *testing.T) {
 	repo, poolDir, path := recoveredFixture(t)
+	t.Chdir(repo)
 	holder := RecoveredLeaseHolder
 	if err := ReleaseConditional(poolDir, path, "", ReleasePreconditions{ExpectedLeaseHolder: &holder}, nil); err != nil {
 		t.Fatal(err)
@@ -329,6 +330,7 @@ func TestNamedReturnReleasesRecoveredEntryForReuse(t *testing.T) {
 // clears the saved field.
 func TestSavedRecoveryReasonIsNeverReported(t *testing.T) {
 	repo, poolDir := setupLocalRepo(t)
+	t.Chdir(repo)
 	path := idleSlots(t, repo, poolDir, 1)[0]
 	writeRawState(t, poolDir, State{Version: stateVersion, Worktrees: []WorktreeEntry{{Name: "1", Path: path, Leased: true, LeaseHolder: RecoveredLeaseHolder, RecoveryReason: "a reason an earlier version recorded"}}})
 	if st := statusOf(t, poolDir, path); st.Status != StatusLeased || st.RecoveryReason != recoveredQuarantineReason {

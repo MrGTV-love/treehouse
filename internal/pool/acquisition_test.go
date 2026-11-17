@@ -59,6 +59,26 @@ func acquisitionFixture(t *testing.T, count int) (string, string, []string) {
 	return repo, pool, paths
 }
 
+func readFixtureFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func checkoutFixtureFile(t *testing.T, repo, object string) string {
+	t.Helper()
+	cmd := exec.Command("git", "cat-file", "--filters", object)
+	cmd.Dir = repo
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git cat-file --filters %s: %v", object, err)
+	}
+	return string(out)
+}
+
 func probePoolLock(t *testing.T, pool string) string {
 	t.Helper()
 	f, err := os.OpenFile(lockFilePath(pool), os.O_RDWR, 0644)
@@ -270,6 +290,7 @@ func TestAcquireFenceProtectsLastComparisonThroughReset(t *testing.T) {
 	for _, stage := range []string{"claimed", "reset"} {
 		t.Run(stage, func(t *testing.T) {
 			repo, pool, paths := acquisitionFixture(t, 2)
+			original := readFixtureFile(t, filepath.Join(paths[0], "README.md"))
 			// The slot is a clean ancestor with recognizable content. Resetting it
 			// after a successful takeover would visibly replace that content.
 			if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("new reset target\n"), 0644); err != nil {
@@ -316,7 +337,7 @@ func TestAcquireFenceProtectsLastComparisonThroughReset(t *testing.T) {
 					t.Fatal("replacement writer changed original claim")
 				}
 				data, err := os.ReadFile(filepath.Join(path, "README.md"))
-				if err != nil || string(data) != "hi\n" {
+				if err != nil || string(data) != original {
 					t.Fatalf("checkout changed: %q %v", data, err)
 				}
 				takeoverChecked = true
@@ -326,7 +347,7 @@ func TestAcquireFenceProtectsLastComparisonThroughReset(t *testing.T) {
 			if replacement.LeaseID != "" {
 				state, readErr := ReadState(pool)
 				data, fileErr := os.ReadFile(filepath.Join(paths[0], "README.md"))
-				if readErr != nil || fileErr != nil || string(data) != "hi\n" || state.Worktrees[0].LeaseID != replacement.LeaseID || state.Worktrees[0].LeaseHolder != "replacement" || got == paths[0] {
+				if readErr != nil || fileErr != nil || string(data) != original || state.Worktrees[0].LeaseID != replacement.LeaseID || state.Worktrees[0].LeaseHolder != "replacement" || got == paths[0] {
 					t.Fatalf("get acted after replacement takeover: path=%q contents=%q replacement=%#v state=%#v read=%v file=%v acquire=%v", got, data, replacement, state, readErr, fileErr, err)
 				}
 				return
@@ -348,6 +369,7 @@ func TestAcquireFenceProtectsLastComparisonThroughReset(t *testing.T) {
 
 func TestAcquireForeignRemovalFence(t *testing.T) {
 	repo, pool, paths := acquisitionFixture(t, 2)
+	original := readFixtureFile(t, filepath.Join(paths[0], "README.md"))
 	caller := filepath.Join(t.TempDir(), "myrepo")
 	runGit(t, repo, "clone", filepath.Join(filepath.Dir(repo), "remote.git"), caller)
 	old := acquisitionStage
@@ -384,7 +406,7 @@ func TestAcquireForeignRemovalFence(t *testing.T) {
 			t.Fatal("foreign claim changed")
 		}
 		data, err := os.ReadFile(filepath.Join(path, "README.md"))
-		if err != nil || string(data) != "hi\n" {
+		if err != nil || string(data) != original {
 			t.Fatalf("foreign checkout changed: %q %v", data, err)
 		}
 		independent, err = AcquireLeaseInfoWithOptions(caller, pool, 2, nil, "independent foreign capacity", AcquireOptions{SkipFetch: true})
@@ -423,6 +445,7 @@ func TestAcquireLateCLILeaseTakeover(t *testing.T) {
 		t.Fatalf("build CLI: %v\n%s", err, out)
 	}
 	repo, pool, paths := acquisitionFixture(t, 2)
+	original := readFixtureFile(t, filepath.Join(paths[0], "README.md"))
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("new reset target\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +481,7 @@ func TestAcquireLateCLILeaseTakeover(t *testing.T) {
 	if replacement.LeaseID != "" {
 		state, readErr := ReadState(pool)
 		data, fileErr := os.ReadFile(filepath.Join(paths[0], "README.md"))
-		if readErr != nil || fileErr != nil || string(data) != "hi\n" || state.Worktrees[0].LeaseID != replacement.LeaseID || state.Worktrees[0].LeaseHolder != "CLI replacement" || got == paths[0] {
+		if readErr != nil || fileErr != nil || string(data) != original || state.Worktrees[0].LeaseID != replacement.LeaseID || state.Worktrees[0].LeaseHolder != "CLI replacement" || got == paths[0] {
 			t.Fatalf("get acted on CLI replacement: contents=%q state=%#v path=%q acquire=%v", data, state, got, err)
 		}
 	} else if err != nil || got != paths[0] {
@@ -486,6 +509,7 @@ func TestAcquireReleaseThenOwnerReclaim(t *testing.T) {
 	for _, writer := range []string{"Release", "ReleaseConditional"} {
 		t.Run(writer, func(t *testing.T) {
 			repo, pool, paths := acquisitionFixture(t, 2)
+			originalReadme := readFixtureFile(t, filepath.Join(paths[0], "README.md"))
 			// A wants a newer target, but an unconditional return and B's get
 			// both park at main. B therefore retains A's observed HEAD, so Git's
 			// HEAD-change check cannot hide an owner-reservation takeover bug.
@@ -562,7 +586,9 @@ func TestAcquireReleaseThenOwnerReclaim(t *testing.T) {
 				if replacement.Leased || replacement.LeaseID != "" || replacement.OwnerPID != int32(child.Process.Pid) || replacement.OwnerStartedAt == 0 || replacement.OwnerPID == original.OwnerPID {
 					t.Fatalf("replacement is not a distinct live default owner: %#v original=%#v", replacement, original)
 				}
-				assertFileContents(t, filepath.Join(replacementPath, "README.md"), "hi\n")
+				if got := readFixtureFile(t, filepath.Join(replacementPath, "README.md")); got != originalReadme {
+					t.Fatalf("replacement checkout = %q, want %q", got, originalReadme)
+				}
 				t.Logf("%s released=%t; replacement owner=%d/%d path=%s; lease fields remain false/empty", writer, released, replacement.OwnerPID, replacement.OwnerStartedAt, replacement.Path)
 			}
 			t.Cleanup(func() { acquisitionStage = oldStage })
@@ -581,7 +607,7 @@ func TestAcquireReleaseThenOwnerReclaim(t *testing.T) {
 				}
 			}
 			data, fileErr := os.ReadFile(filepath.Join(replacement.Path, "README.md"))
-			if !found || fileErr != nil || string(data) != "hi\n" || got == replacement.Path {
+			if !found || fileErr != nil || string(data) != originalReadme || got == replacement.Path {
 				t.Fatalf("A acted on replacement owner: contents=%q reservationRetained=%t replacement=%#v Apath=%s Aerror=%v read=%v", data, found, replacement, got, acquireErr, fileErr)
 			}
 			if !released && (acquireErr != nil || got != paths[0]) {
@@ -742,6 +768,7 @@ func TestAcquireRefusedScreeningCrashReservations(t *testing.T) {
 				runGit(t, repo, "clone", filepath.Join(filepath.Dir(repo), "remote.git"), caller)
 			}
 			const contents = "recognizable refused checkout\n"
+			original := readFixtureFile(t, filepath.Join(paths[0], "README.md"))
 			if err := os.WriteFile(filepath.Join(paths[0], "README.md"), []byte(contents), 0644); err != nil {
 				t.Fatal(err)
 			}
@@ -795,7 +822,7 @@ func TestAcquireRefusedScreeningCrashReservations(t *testing.T) {
 			assertFileContents(t, filepath.Join(paths[0], "README.md"), contents)
 			// No named return is needed: repairing the actual risk must make the
 			// same-clone copy reusable or the foreign one reclaimable again.
-			if err := os.WriteFile(filepath.Join(paths[0], "README.md"), []byte("hi\n"), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(paths[0], "README.md"), []byte(original), 0644); err != nil {
 				t.Fatal(err)
 			}
 			got, err = AcquireLeaseInfoWithOptions(caller, pool, 2, nil, "after repair", AcquireOptions{SkipFetch: true})
@@ -826,6 +853,7 @@ func TestAcquireFreshCrashReservations(t *testing.T) {
 		for _, leased := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/lease=%t", stage, leased), func(t *testing.T) {
 				repo, pool, _ := acquisitionFixture(t, 0)
+				original := checkoutFixtureFile(t, repo, "main:README.md")
 				mode := "0"
 				if leased {
 					mode = "1"
@@ -877,7 +905,7 @@ func TestAcquireFreshCrashReservations(t *testing.T) {
 						t.Fatal("created fresh checkout lost quarantine")
 					}
 					data, err := os.ReadFile(filepath.Join(claim.Path, "README.md"))
-					if err != nil || string(data) != "hi\n" {
+					if err != nil || string(data) != original {
 						t.Fatalf("created checkout lost contents: %q %v", data, err)
 					}
 				}

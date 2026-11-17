@@ -127,6 +127,21 @@ func (b *Backend) CommonGitDir(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return colocatedGitDir(mainRoot)
+}
+
+// WorkspaceCommonGitDir is CommonGitDir for a workspace root. It reads the
+// .jj/repo store pointer and never starts jj, so the query is never a process
+// inside the workspace.
+func WorkspaceCommonGitDir(wsRoot string) (string, error) {
+	mainRoot, err := MainRootFromWorkspaceRoot(wsRoot)
+	if err != nil {
+		return "", err
+	}
+	return colocatedGitDir(mainRoot)
+}
+
+func colocatedGitDir(mainRoot string) (string, error) {
 	gitDir := filepath.Join(mainRoot, ".git")
 	if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
 		return gitDir, nil

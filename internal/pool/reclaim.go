@@ -12,9 +12,11 @@ import (
 
 // reclaimForeignWorktree runs only at the cap, after own-clone reuse failed.
 // Each candidate has its own fence and reservation; no VCS or process work
-// holds the pool lock. The caller creates its own tree, never reuses a foreign one.
-func reclaimForeignWorktree(poolDir string, snapshot State, candidates []int, requester os.FileInfo, opts acquireOptions, selection process.WorktreeSnapshot, scanErr error, report func(string, string, string)) ([]string, error) {
+// holds the pool lock. The removal and the caller's fresh claim are one state
+// write; the caller creates its own tree, never reuses a foreign one.
+func reclaimForeignWorktree(repoRoot, poolDir string, poolSize, firstSlot int, snapshot State, candidates []int, requester os.FileInfo, opts acquireOptions, selection process.WorktreeSnapshot, scanErr error, report func(string, string, string)) ([]string, *acquisitionClaim, error) {
 	var refusals []string
+	var fresh *acquisitionClaim
 	for _, index := range candidates {
 		wt := snapshot.Worktrees[index]
 		reported := false
@@ -43,7 +45,7 @@ func reclaimForeignWorktree(poolDir string, snapshot State, candidates []int, re
 		claim, err := claimCandidate(poolDir, wt)
 		if err != nil {
 			report(wt.Path, "refused", "foreign reservation could not be saved")
-			return refusals, err
+			return refusals, nil, err
 		}
 		if claim == nil {
 			skip("reservation changed or acquisition in progress", "reservation changed or acquisition in progress")
@@ -142,15 +144,16 @@ func reclaimForeignWorktree(poolDir string, snapshot State, candidates []int, re
 			// Commit the deletion before creation: a failed add cannot leave the
 			// removed foreign registration consuming the shared budget in state.
 			removed = true
-			if err := claim.save(State{}); err != nil {
-				return fmt.Errorf("foreign worktree %s removed but state update failed: %w", wt.Name, err)
-			}
 			if container != wt.Path {
 				// Only remove an empty pool-owned container. Files beside the old
 				// worktree are not its contents and must never be deleted here.
 				if err := os.Remove(container); err != nil && !os.IsNotExist(err) {
 					fmt.Fprintf(os.Stderr, "treehouse: warning: reclaimed worktree %s but kept its slot directory: %v\n", wt.Name, err)
 				}
+			}
+			fresh, err = claim.replaceWithFresh(repoRoot, poolSize, firstSlot, opts)
+			if err != nil {
+				return fmt.Errorf("foreign worktree %s removed but state update failed: %w", wt.Name, err)
 			}
 			fmt.Fprintf(os.Stderr, "treehouse: reclaimed idle foreign-clone worktree %s for this clone.\n", wt.Name)
 			return nil
@@ -159,12 +162,12 @@ func reclaimForeignWorktree(poolDir string, snapshot State, candidates []int, re
 			if !reported {
 				report(wt.Path, "refused", "foreign reclamation failed")
 			}
-			return refusals, err
+			return refusals, nil, err
 		}
 		if removed {
 			report(wt.Path, "accepted", "reclaimed safe foreign copy")
-			return refusals, nil
+			return refusals, fresh, nil
 		}
 	}
-	return refusals, nil
+	return refusals, nil, nil
 }

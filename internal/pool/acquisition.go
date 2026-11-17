@@ -2,6 +2,7 @@ package pool
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,10 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrAcquisitionInProgress reports a slot fenced by a concurrent get. The get
+// may still restore the slot, so callers treat it as a skip, not a failure.
+var ErrAcquisitionInProgress = errors.New("acquisition in progress")
 
 // Slot locks fence acquisition's checkout work from reservation writers. They
 // are always taken nonblocking under the state lock, never waited on there.
@@ -27,7 +32,7 @@ func lockSlot(poolDir, name string) (*os.File, error) {
 	}
 	if err := tryLockFile(f); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("worktree %s has an acquisition in progress: %w", name, err)
+		return nil, fmt.Errorf("worktree %s has an %w: %v", name, ErrAcquisitionInProgress, err)
 	}
 	return f, nil
 }
@@ -132,57 +137,115 @@ func claimFresh(repoRoot, poolDir string, poolSize, firstSlot int, opts acquireO
 		if err != nil {
 			return err
 		}
-		if len(state.Worktrees) >= poolSize {
+		fresh, err := reserveFresh(repoRoot, poolDir, &state, poolSize, firstSlot, opts)
+		if err != nil || fresh == nil {
+			return err
+		}
+		if err := fresh.publish(state); err != nil {
+			fresh.close()
+			return err
+		}
+		claim = fresh
+		return nil
+	})
+	return claim, err
+}
+
+// reserveFresh runs under the state lock and appends a fenced provisional
+// entry to state without persisting it; nil means the pool is at the cap.
+func reserveFresh(repoRoot, poolDir string, state *State, poolSize, firstSlot int, opts acquireOptions) (*acquisitionClaim, error) {
+	if len(state.Worktrees) >= poolSize {
+		return nil, nil
+	}
+	slot := nextSlotNumber(*state)
+	// The default layout selected its new name before foreign reclamation.
+	// Keep that floor, while still avoiding names another get has claimed.
+	if opts.worktreePath == "" && slot < firstSlot {
+		slot = firstSlot
+	}
+	name := strconv.Itoa(slot)
+	path, err := resolveWorktreePath(repoRoot, poolDir, name, opts.worktreePath, opts.uniqueLeaf)
+	if err != nil {
+		return nil, err
+	}
+	if opts.worktreePath != "" {
+		name, path, err = freeTemplatedSlot(repoRoot, poolDir, *state, poolSize, opts)
+		if err != nil {
+			return nil, err
+		}
+	} else if err := reclaimEmptySlotDirectory(path); err != nil {
+		return nil, err
+	}
+	fence, err := lockSlot(poolDir, name)
+	if err != nil {
+		return nil, err
+	}
+	entry := WorktreeEntry{Name: name, Path: path, CreatedAt: time.Now(), BaseBranch: opts.baseBranch}
+	// Fresh creation can run checkout hooks and seed ignored files before
+	// publication. Its existing provisional lease must survive a crash or
+	// failed later write; it is not a published owner/consumer lease yet.
+	setSeedInventory(&entry, nil, false)
+	entry.Leased = true
+	entry.LeaseHolder = acquisitionIncompleteLeaseHolder
+	entry.LeasedAt = time.Now()
+	state.Worktrees = append(state.Worktrees, entry)
+	return &acquisitionClaim{poolDir: poolDir, entry: entry, fence: fence}, nil
+}
+
+// publish runs under the state lock, persists state, and adopts the
+// persisted form of the claimed entry.
+func (c *acquisitionClaim) publish(state State) error {
+	if err := persistState(c.poolDir, state); err != nil {
+		return err
+	}
+	persisted, err := ReadState(c.poolDir)
+	if err != nil {
+		return err
+	}
+	for _, wt := range persisted.Worktrees {
+		if wt.Name == c.entry.Name {
+			c.entry = wt
 			return nil
 		}
-		slot := nextSlotNumber(state)
-		// The default layout selected its new name before foreign reclamation.
-		// Keep that floor, while still avoiding names another get has claimed.
-		if opts.worktreePath == "" && slot < firstSlot {
-			slot = firstSlot
-		}
-		name := strconv.Itoa(slot)
-		path, err := resolveWorktreePath(repoRoot, poolDir, name, opts.worktreePath, opts.uniqueLeaf)
+	}
+	return fmt.Errorf("worktree %s disappeared after claim", c.entry.Name)
+}
+
+// replaceWithFresh drops the removed foreign entry and claims the capacity it
+// freed in the same state write, so no other get can take that capacity.
+func (c *acquisitionClaim) replaceWithFresh(repoRoot string, poolSize, firstSlot int, opts acquireOptions) (*acquisitionClaim, error) {
+	var claim *acquisitionClaim
+	err := WithStateLock(c.poolDir, func() error {
+		state, err := ReadState(c.poolDir)
 		if err != nil {
 			return err
 		}
-		if opts.worktreePath != "" {
-			name, path, err = freeTemplatedSlot(repoRoot, poolDir, state, poolSize, opts)
-			if err != nil {
-				return err
-			}
-		} else if err := reclaimEmptySlotDirectory(path); err != nil {
-			return err
-		}
-		fence, err := lockSlot(poolDir, name)
-		if err != nil {
-			return err
-		}
-		entry := WorktreeEntry{Name: name, Path: path, CreatedAt: time.Now(), BaseBranch: opts.baseBranch}
-		// Fresh creation can run checkout hooks and seed ignored files before
-		// publication. Its existing provisional lease must survive a crash or
-		// failed later write; it is not a published owner/consumer lease yet.
-		setSeedInventory(&entry, nil, false)
-		entry.Leased = true
-		entry.LeaseHolder = acquisitionIncompleteLeaseHolder
-		entry.LeasedAt = time.Now()
-		state.Worktrees = append(state.Worktrees, entry)
-		if err := persistState(poolDir, state); err != nil {
-			fence.Close()
-			return err
-		}
-		persisted, err := ReadState(poolDir)
-		if err != nil {
-			fence.Close()
-			return err
-		}
-		for _, wt := range persisted.Worktrees {
-			if wt.Name == name {
-				entry = wt
+		index := -1
+		for i, wt := range state.Worktrees {
+			if wt.Name == c.entry.Name {
+				index = i
 				break
 			}
 		}
-		claim = &acquisitionClaim{poolDir: poolDir, entry: entry, fence: fence}
+		if index < 0 {
+			return fmt.Errorf("worktree %s disappeared during acquisition", c.entry.Name)
+		}
+		if !reflect.DeepEqual(state.Worktrees[index], c.entry) {
+			return fmt.Errorf("worktree %s reservation changed during acquisition", c.entry.Name)
+		}
+		state.Worktrees = append(state.Worktrees[:index], state.Worktrees[index+1:]...)
+		fresh, freshErr := reserveFresh(repoRoot, c.poolDir, &state, poolSize, firstSlot, opts)
+		if fresh == nil {
+			if err := persistState(c.poolDir, state); err != nil {
+				return err
+			}
+			return freshErr
+		}
+		if err := fresh.publish(state); err != nil {
+			fresh.close()
+			return err
+		}
+		claim = fresh
 		return nil
 	})
 	return claim, err
@@ -212,23 +275,13 @@ func claimCandidate(poolDir string, observed WorktreeEntry) (*acquisitionClaim, 
 				fence.Close()
 				return err
 			}
-			if err := persistState(poolDir, state); err != nil {
+			reserved := &acquisitionClaim{poolDir: poolDir, entry: wt, fence: fence}
+			if err := reserved.publish(state); err != nil {
 				fence.Close()
 				return err
 			}
-			persisted, err := ReadState(poolDir)
-			if err != nil {
-				fence.Close()
-				return err
-			}
-			for _, entry := range persisted.Worktrees {
-				if entry.Name == wt.Name {
-					claim = &acquisitionClaim{poolDir: poolDir, entry: entry, fence: fence}
-					return nil
-				}
-			}
-			fence.Close()
-			return fmt.Errorf("worktree %s disappeared after claim", wt.Name)
+			claim = reserved
+			return nil
 		}
 		return nil
 	})

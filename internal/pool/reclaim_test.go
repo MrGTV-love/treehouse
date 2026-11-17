@@ -301,11 +301,13 @@ func TestAcquire_ForeignReclamationStateWriteFailureStopsBeforeCreation(t *testi
 	oldWrite := writeState
 	writeState = func(pool string, state State) error {
 		// Claim writes now precede screening. Fail the deletion commit itself,
-		// preserving the obligation that it must abort before fresh creation.
-		if len(state.Worktrees) == 0 {
-			return errors.New("state write failed")
+		// which also claims the freed capacity, so it must abort before creation.
+		for _, wt := range state.Worktrees {
+			if wt.Path == path {
+				return oldWrite(pool, state)
+			}
 		}
-		return oldWrite(pool, state)
+		return errors.New("state write failed")
 	}
 	t.Cleanup(func() { writeState = oldWrite })
 	got, err := Acquire(caller, poolDir, 1, nil)

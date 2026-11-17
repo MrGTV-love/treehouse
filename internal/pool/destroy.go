@@ -421,7 +421,9 @@ func executeDestroy(poolDir string, removable []DestroyTarget, resolveContext pr
 				continue
 			}
 			if err := slotWritable(poolDir, state.Worktrees[i].Name); err != nil {
-				skips = append(skips, DestroySkip{Target: plannedByPath[state.Worktrees[i].Path]})
+				fenced := plannedByPath[state.Worktrees[i].Path]
+				fenced.Detail = ErrAcquisitionInProgress.Error()
+				skips = append(skips, DestroySkip{Target: fenced})
 				continue
 			}
 			context := resolveDestroyContext(resolveContext, state.Worktrees[i])

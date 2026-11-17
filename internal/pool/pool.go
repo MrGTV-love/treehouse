@@ -691,18 +691,22 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		}
 	}
 	var reclaimDetails string
+	var claim *acquisitionClaim
 	if len(foreignCandidates) != 0 {
-		refusals, err := reclaimForeignWorktree(poolDir, snapshot, foreignCandidates, commonDir, opts, selection, scanErr, report)
+		refusals, reclaimed, err := reclaimForeignWorktree(repoRoot, poolDir, poolSize, nextSlotNumber(snapshot), snapshot, foreignCandidates, commonDir, opts, selection, scanErr, report)
 		if err != nil {
 			return LeaseInfo{}, err
 		}
 		if len(refusals) > 0 {
 			reclaimDetails = ". Reclamation skipped: " + strings.Join(refusals, "; ")
 		}
+		claim = reclaimed
 	}
-	claim, err := claimFresh(repoRoot, poolDir, poolSize, nextSlotNumber(snapshot), opts)
-	if err != nil {
-		return LeaseInfo{}, err
+	if claim == nil {
+		claim, err = claimFresh(repoRoot, poolDir, poolSize, nextSlotNumber(snapshot), opts)
+		if err != nil {
+			return LeaseInfo{}, err
+		}
 	}
 	if claim == nil {
 		if otherFlavor > 0 {

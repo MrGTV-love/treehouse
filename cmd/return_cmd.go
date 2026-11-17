@@ -305,6 +305,9 @@ func returnHeldWorktrees() error {
 		case errors.Is(err, pool.ErrLeasePreconditionFailed):
 			skipped = append(skipped, wt.Name)
 			fmt.Fprintf(os.Stderr, "   %s skipped: it is no longer the acquisition this run listed, so it was left alone (%v).\n", wt.Name, err)
+		case errors.Is(err, pool.ErrAcquisitionInProgress):
+			skipped = append(skipped, wt.Name)
+			fmt.Fprintf(os.Stderr, "   %s skipped: another get is checking it, so it was left alone.\n", wt.Name)
 		case errors.Is(err, pool.ErrRecoveredEntry):
 			skipped = append(skipped, wt.Name)
 			fmt.Fprintf(os.Stderr, "   %s skipped: it was recovered since this run listed it, so it is only returned by name. Check it, then run: treehouse return %s\n", wt.Name, quoteReturnPath(wt.Path))

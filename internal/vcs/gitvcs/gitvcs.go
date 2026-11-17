@@ -92,6 +92,24 @@ func CommonGitDir(dir string) (string, error) {
 	return p, nil
 }
 
+// WorktreeCommonGitDir returns CommonGitDir for a checkout root that holds a
+// .git marker, without starting git inside that checkout: git reads the
+// marker through --git-dir from the caller's own working directory. A
+// concurrent get's process snapshot therefore never sees this query as a
+// tenant of a copy it has not fenced.
+func WorktreeCommonGitDir(worktreePath string) (string, error) {
+	gitDir := "--git-dir=" + filepath.Join(worktreePath, ".git")
+	out, err := runGit("", gitDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		// Older git without --path-format prints a path relative to our cwd.
+		out, err = runGit("", gitDir, "rev-parse", "--git-common-dir")
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Abs(filepath.FromSlash(out))
+}
+
 func repoRootFromCommonGitDir(dir string) (string, bool) {
 	cleaned := filepath.Clean(filepath.FromSlash(dir))
 	if filepath.Base(cleaned) != ".git" {

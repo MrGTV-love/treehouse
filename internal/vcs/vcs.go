@@ -274,6 +274,16 @@ func GetDefaultBranch(repoRoot string) (string, error) {
 // containing dir.
 func CommonGitDir(dir string) (string, error) { return backendFor(dir).CommonGitDir(dir) }
 
+// WorktreeCommonGitDir is CommonGitDir for a checkout root. When the root's
+// own marker is a .git entry, git runs outside the checkout, so the query is
+// never a process inside a copy another get may be screening.
+func WorktreeCommonGitDir(path string) (string, error) {
+	if WorktreeBackendName(path) == "git" {
+		return gitvcs.WorktreeCommonGitDir(path)
+	}
+	return CommonGitDir(path)
+}
+
 // HasRemote reports whether the named remote exists.
 func HasRemote(repoRoot, name string) bool { return backendFor(repoRoot).HasRemote(repoRoot, name) }
 

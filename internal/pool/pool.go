@@ -434,7 +434,7 @@ func reclaimEmptySlotDirectory(path string) error {
 // has no common Git dir) is an error: ownership that cannot be proven is
 // never treated as a match.
 func acquisitionCommonGitDir(dir string) (os.FileInfo, error) {
-	commonDir, err := vcs.CommonGitDir(dir)
+	commonDir, err := vcs.WorktreeCommonGitDir(dir)
 	if err != nil {
 		return nil, err
 	}

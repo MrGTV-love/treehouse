@@ -54,6 +54,7 @@ match=(kind=='selection' and cwd==target and 'status' in args or
        kind=='reset' and cwd==target and 'read-tree' in args or
        kind=='foreign-selection' and cwd==target and 'ls-files' in args and '-v' in args or
        kind=='foreign-remove' and 'worktree' in args and 'remove' in args and target in args or
+       kind=='preclaim' and '--git-common-dir' in args and (cwd==target or '--git-dir='+os.path.join(target,'.git') in args) or
        kind in ('progress','progress-foreign') and cwd in json.loads(os.environ['LAB_PROGRESS_PATHS']) and
        ('status' in args if kind=='progress' else 'ls-files' in args and '-v' in args))
 if match:
@@ -62,8 +63,9 @@ if match:
   fd=os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY); os.close(fd)
  except FileExistsError: pass
  else:
-  # A shim awaiting the controller is not a tenant of the candidate checkout.
-  os.chdir(root)
+  # A shim awaiting the controller is not a tenant of the candidate checkout,
+  # except a preclaim hold: its working directory is exactly what is tested.
+  if kind!='preclaim': os.chdir(root)
   s=socket.socket(socket.AF_UNIX); s.connect(os.environ['LAB_SOCKET']); s.sendall(b'H'); s.recv(1); s.close()
   os.chdir(cwd)
 if os.environ.get('LAB_DELAY'): time.sleep(float(os.environ['LAB_DELAY']))
@@ -231,6 +233,33 @@ def exclusive(kind):
         if connection is not None: connection.sendall(b'R');connection.close()
         server.close()
         if first.poll() is None:first.kill()
+        first.communicate()
+
+
+def unfenced_identity():
+    # A get's clone filter runs before it fences a copy. While it is held
+    # there, a second get must still be able to claim that copy: the filter
+    # must not be a process inside the checkout for the second get's snapshot.
+    f = Fixture(1)
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(f.socket_path)); server.listen()
+    first = f.start('preclaim-first', 'preclaim', f.paths[0]); connection = None
+    try:
+        connection, _ = server.accept()
+        assert connection.recv(1) == b'H'
+        assert not f.locked(), 'pool lock held at the clone filter'
+        second = f.command('get', '--lease', '--no-fetch')
+        assert second.returncode == 0 and second.stdout.strip() == f.paths[0], ('unfenced clone filter made a sibling refuse a free copy', second.returncode, second.stdout, second.stderr)
+        connection.sendall(b'R'); connection.close(); connection = None
+        out, err = first.communicate()
+        assert first.returncode != 0 and not out.strip(), ('only copy handed out twice', first.returncode, out, err)
+        state = f.state()
+        assert len(state) == 1 and state[0]['path'] == f.paths[0] and state[0].get('leased'), state
+        record('TG2 unfenced clone filter is not a tenant: a sibling claims the copy it was filtering; fixture='+str(f.root))
+    finally:
+        if connection is not None: connection.sendall(b'R'); connection.close()
+        server.close()
+        if first.poll() is None: first.kill()
         first.communicate()
 
 
@@ -534,6 +563,7 @@ try:
         concurrent('selection',8,1)
         exclusive('selection')
         exclusive('foreign-selection')
+        unfenced_identity()
     if ARGS.only in ['all','concurrent','independent-below']:
         concurrent('selection',2,0,extra_capacity=1)
     if ARGS.only in ['all','safety']: safety()

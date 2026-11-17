@@ -236,7 +236,7 @@ Or set `apfs_sharing = "fresh"` in `treehouse.toml` or `~/.config/treehouse/conf
 
 The native implementation hashes the original destination and source, clones into destination-local staging, verifies the staged bytes, restores destination permissions/timestamps/xattrs and verifies them along with owner/group, hashes again, and atomically replaces the destination. Inode and ctime change; creation time is not preserved. Symlinked paths, ACLs, hardlinks, special mode/flag bits, sparse/compressed representations, different owners, and unsupported metadata are skipped. Other operating systems, non-APFS filesystems and cross-volume pairs keep ordinary copies, with the reason on stderr. No Python helper or daemon is required.
 
-Diagnostics stay on **stderr**, including for `get --lease --json`; stdout retains its path/lease contract. `logical_bytes` is the payload cloned. `private_data_reduced_bytes` is a separate before/after APFS allocation measurement, **not** an immediate increase in volume free space: snapshots, shared extents and filesystem metadata matter. The initial checkout still needs its full allocation, and later writes need free space for private blocks. The pass adds synchronous hashing/metadata work while the pool is locked; opt-in does not guarantee a speedup.
+Diagnostics stay on **stderr**, including for `get --lease --json`; stdout retains its path/lease contract. `logical_bytes` is the payload cloned. `private_data_reduced_bytes` is a separate before/after APFS allocation measurement, **not** an immediate increase in volume free space: snapshots, shared extents and filesystem metadata matter. The initial checkout still needs its full allocation, and later writes need free space for private blocks. The pass adds synchronous hashing/metadata work while the new slot is fenced (the pool lock is not held, so other gets proceed); opt-in does not guarantee a speedup.
 
 A safe per-file clone, metadata or ENOSPC failure leaves the original in place and reports a skip/error. Detected destination/status/index/HEAD changes, cancellation, or incomplete staging cleanup fail acquisition and retain the provisional lease as quarantine, without publishing a path. Inspect the slot before returning or destroying it. SIGINT/SIGTERM unwind staging; SIGKILL can leave `.treehouse-sharing-*` directories, but the unpublished slot remains leased. Do not treat such a slot as ready for use or delete similarly named files in other worktrees.
 
@@ -292,7 +292,7 @@ path=$(treehouse get --lease)
 # $path is the leased worktree's absolute path; all banners went to stderr.
 ```
 
-It acquires a worktree exactly like `get`, but instead of opening a subshell it marks the worktree **leased** in treehouse's persistent state. By default it prints only the worktree's absolute path to stdout; `--json` prints the lease allocation instead. Every human-facing message goes to stderr, so either output mode stays clean.
+It acquires a worktree exactly like `get`, but instead of opening a subshell it marks the worktree **leased** in treehouse's persistent state. By default it prints only the worktree's absolute path to stdout; `--json` prints the lease allocation instead. Every human-facing message goes to stderr, so either output mode stays clean. Each copy `get` checks for reuse or reclamation reports one line on stderr, `treehouse: checked <absolute copy path>: <accepted|refused|skipped>: <reason>`; an allocation into an empty pool checks no copy and prints none (see [Pool and lifecycle invariants](docs/design.md#pool-and-lifecycle-invariants)).
 
 An ordinary lease keeps a worktree out of later `get` and `prune`, regardless of whether any process runs inside it, until the lease is explicitly released. A recovered lease is a persistent quarantine: it stays until a `return` that names its slot, and no other command frees it (see [Recovering missing pool state](#recovering-missing-pool-state)).
 A bulk `treehouse destroy <pool> --all` never removes it either; only naming its exact path with `treehouse destroy <path> --include-leased --yes` will.
@@ -384,10 +384,11 @@ Naming any of them explicitly still returns it, including a bare `treehouse retu
 
 This target set is deliberately wider than the other bulk verbs. `prune` never touches a leased slot, and `destroy` removes one only when its exact path is named with `--include-leased`; `--all` clears leased and in-use slots. Those verbs delete a worktree, while a return keeps it in the pool, and reclaiming a whole pool whose agents are gone is what the verb is for. Terminate the agents first if they are still working.
 
-Two outcomes are reported as **skipped**, count against neither the returns nor the failures, and leave the slot exactly as it was:
+Three outcomes are reported as **skipped**, count against neither the returns nor the failures, and leave the slot exactly as it was:
 
 - **No longer the acquisition the listing saw.** `--all` lists the pool once and then works through it, so an earlier confirmation can hold the run open while a later slot changes state. The listing is a snapshot taken without the pool lock, so it can be as old as the whole scan. Each release is therefore pinned to the reservation the listing saw, and that pin is checked again under the state lock: a slot that was leased is refused unless that same lease is still on it - whether it was handed to someone else or simply returned in the meantime - and a slot that was not leased is refused if it has been leased since or has been reserved by a new plain `treehouse get` session, so a worker started after the listing is never terminated. The report says only that the slot is no longer the acquisition the run listed, because the reservation is all that was compared. That is also the whole guarantee: a slot whose processes changed without any reservation changing is still returned, which is what `--all` does to in-use slots by design.
 - **Still recovered.** A [recovered slot](#recovering-missing-pool-state) is a persistent quarantine and is always skipped by `--all`. A missing or invalid state key can relabel a whole pool at once. Each release checks again, under the state lock, whether the slot is recovered, so a slot recovered after the listing is skipped too, before the dirty confirmation. The run names `treehouse return <path>` for each remaining slot: after inspecting it, that named return releases it, confirming first if it has uncommitted changes, and warns that any ignored files treehouse seeded into it are not cleaned up. `treehouse destroy <path> --include-leased --yes` removes it instead.
+- **Another `get` is checking it.** A `get` holds a per-slot fence while it checks, resets or creates a slot. Each release checks that fence under the state lock and skips a fenced slot before any action.
 
 Each worktree is returned exactly as naming it would be, including the confirmation before uncommitted changes are discarded. Declining one - or failing to return one - never stops the worktrees after it, and the summary names every slot that was left behind. `--all` takes no path or name, and cannot be combined with `--if-lease-id` or `--if-lease-holder`, which identify a single acquisition.
 
@@ -595,17 +596,19 @@ operation-state or remote-landing check means leave the slot alone. A local
 base branch or stale remote-tracking ref is not sufficient deletion evidence.
 If no foreign slot qualifies, or the pool is already above the effective cap,
 acquisition fails. When reclamation at the cap skips every candidate, the error
-lists each slot's first refusal reason (for example a held `HEAD.lock` or an
-unseeded ignored path). Reuse of a safe own-clone slot still works at the cap.
+lists each foreign candidate's first refusal reason (for example a held
+`HEAD.lock` or an unseeded ignored path); slots refused earlier appear only in
+their `treehouse: checked` lines on stderr. Reuse of a safe own-clone slot still works at the cap.
 
 Automatic reclamation removes the old checkout using Git's non-forced
 clean-worktree removal. Ignored files may be deleted only when every path is
 in the authenticated seeded-file inventory; unseeded ignored configuration,
 build output, and caches prevent reclamation. Git replacement refs also
 prevent reclamation. Worktrees are never migrated between clones, and files
-beside the old checkout are left alone. The deletion is recorded before
-creating the replacement, so a later creation failure leaves a freed slot
-rather than a foreign slot consuming the budget.
+beside the old checkout are left alone. The deletion and this get's claim on
+the freed capacity are recorded in one write before creating the replacement,
+so another get cannot take that capacity, and a later creation failure leaves a
+freed slot rather than a foreign slot consuming the budget.
 See [Pool and lifecycle invariants](docs/design.md#pool-and-lifecycle-invariants)
 for the implementation's ownership, locking, and remote-proof checks.
 

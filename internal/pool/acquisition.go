@@ -51,7 +51,7 @@ type acquisitionClaim struct {
 
 func (c *acquisitionClaim) close() { c.fence.Close() }
 
-// Callers omit a clean first reuse and empty-pool creation. Every other
+// Callers omit empty-pool creation, which checks no candidate. Every candidate
 // completion is reported immediately, once per path. Fixed reasons never
 // include Git output or checkout contents.
 var candidateProgressPathEscaper = strings.NewReplacer("\\", "\\\\", "\r", "\\r", "\n", "\\n")

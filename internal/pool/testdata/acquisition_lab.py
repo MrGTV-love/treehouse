@@ -16,7 +16,7 @@ PARSER = argparse.ArgumentParser()
 PARSER.add_argument('binary')
 PARSER.add_argument('--base', action='store_true')
 PARSER.add_argument('--evidence')
-PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress','independent-below'], default='all')
+PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress','independent-below','first-copy'], default='all')
 ARGS = PARSER.parse_args()
 BINARY = str(Path(ARGS.binary).resolve())
 REAL_GIT = shutil.which('git')
@@ -321,6 +321,23 @@ def readable(stream):
     return result.decode()
 
 
+def initial_allocations():
+    for count in (1, 0):
+        fixture = Fixture(count)
+        if count == 0:
+            (fixture.caller/'treehouse.toml').write_text('max_trees = 1\n')
+        assert all(not entry.get('leased') and not entry.get('owner_pid') for entry in fixture.state())
+        result = fixture.command('get', '--lease', '--no-fetch')
+        expected = str(fixture.pool/'1'/'repo')
+        assert result.returncode == 0 and result.stdout == expected+'\n', ('TG8 initial allocation stdout', count, result.stdout, result.stderr)
+        rows = progress_rows(result.stderr)
+        if count and not ARGS.base:
+            assert len(rows) == 1 and rows[0][0] == expected and rows[0][1] == 'accepted' and 'reusable' in rows[0][2], ('TG8 checked first reuse must report acceptance', rows)
+        else:
+            assert rows == [], ('TG8 empty allocation or baseline emitted progress', count, rows)
+        record('TG8 '+('clean first copy' if count else 'empty pool')+': checked records='+str(len(rows))+' stdout is allocation path only; fixture='+str(fixture.root))
+
+
 def incremental_progress(foreign=False):
     f = Fixture(21, foreign=foreign, rejected=20)
     phase = 'foreign' if foreign else 'same-clone'
@@ -382,15 +399,7 @@ def incremental_progress(foreign=False):
             assert (Path(path)/'README').read_text() == 'unlanded unique content '+str(i)+'\n'
         return
 
-    for count in (1, 0):
-        quiet = Fixture(count)
-        if count == 0:
-            (quiet.caller/'treehouse.toml').write_text('max_trees = 1\n')
-        result = quiet.command('get', '--lease', '--no-fetch')
-        expected = str(quiet.pool/'1'/'repo')
-        assert result.returncode == 0 and result.stdout == expected+'\n', ('TG8 quiet allocation stdout', count, result.stdout, result.stderr)
-        assert progress_rows(result.stderr) == [], ('TG8 quiet allocation emitted progress', count, result.stderr)
-        record('TG8 '+('clean first copy' if count else 'fresh allocation')+': no progress; stdout unchanged; fixture='+str(quiet.root))
+    initial_allocations()
 
     creation = Fixture(1, rejected=1)
     (creation.caller/'treehouse.toml').write_text('max_trees = 2\n')
@@ -486,7 +495,7 @@ def safety():
             if ARGS.base:
                 assert rows == [], ('TG8 baseline unexpectedly reports progress', risk, rows)
             elif risk in ['clean','ancestor','squash','ignored']:
-                assert rows == [], ('TG8 clean first copy should stay quiet', risk, rows)
+                assert len(rows) == 1 and rows[0][0] == f.paths[0] and rows[0][1] == 'accepted' and 'reusable' in rows[0][2], ('TG8 clean first copy acceptance missing', risk, rows)
             else:
                 expected_paths = [f.paths[0]] + ([expected] if expected and not risk.startswith('foreign') else [])
                 assert [row[0] for row in rows] == expected_paths, ('TG8 safety candidate count/identity', risk, rows)
@@ -531,6 +540,7 @@ try:
     if ARGS.only in ['all','progress']:
         incremental_progress(foreign=True)
         incremental_progress()
+    if ARGS.only == 'first-copy': initial_allocations()
     if ARGS.only in ['all','cache-failure']: failed_tree()
 finally:
     SOCKET_ROOT.cleanup()

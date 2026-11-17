@@ -677,9 +677,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			for _, index := range foreignCandidates {
 				report(snapshot.Worktrees[index].Path, "skipped", "same-clone reuse selected before reclamation")
 			}
-			if candidateIndex != 0 {
-				report(wt.Path, "accepted", "clean reusable copy")
-			}
+			report(wt.Path, "accepted", "clean reusable copy")
 		} else {
 			report(wt.Path, "refused", reason)
 		}

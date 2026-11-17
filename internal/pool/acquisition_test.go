@@ -24,7 +24,9 @@ func TestAcquireConcurrentCLI(t *testing.T) {
 		t.Skip("python3 is needed for the Unix CLI instrumentation")
 	}
 	binary := filepath.Join(t.TempDir(), "treehouse")
-	build := exec.Command("go", "build", "-o", binary, "../..")
+	// Function entry counters observe reclamation passes, including passes
+	// that refuse every record without starting a candidate Git subprocess.
+	build := exec.Command("go", "build", "-cover", "-covermode=atomic", "-o", binary, "../..")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v\n%s", err, out)
 	}

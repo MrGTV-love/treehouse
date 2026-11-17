@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// ErrAcquisitionInProgress reports a slot fenced by a concurrent get. The get
-// may still restore the slot, so callers treat it as a skip, not a failure.
+// ErrAcquisitionInProgress reports a slot fenced by a concurrent get. Writers
+// must refuse it without waiting under the pool state lock.
 var ErrAcquisitionInProgress = errors.New("acquisition in progress")
 
 // Slot locks fence acquisition's checkout work from reservation writers. They

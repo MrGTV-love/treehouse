@@ -16,7 +16,7 @@ PARSER = argparse.ArgumentParser()
 PARSER.add_argument('binary')
 PARSER.add_argument('--base', action='store_true')
 PARSER.add_argument('--evidence')
-PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress','independent-below','first-copy'], default='all')
+PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress','independent-below','first-copy','second-pass','return-fenced'], default='all')
 ARGS = PARSER.parse_args()
 BINARY = str(Path(ARGS.binary).resolve())
 REAL_GIT = shutil.which('git')
@@ -97,8 +97,10 @@ class Fixture:
         if foreign:
             self.caller = self.root / 'b' / 'repo'
             git(self.repo, 'clone', str(remote), str(self.caller))
+        coverage = self.root/'coverage'
+        coverage.mkdir()
         self.env = os.environ.copy()
-        self.env.update(TREEHOUSE_ROOT=str(self.root / 'pools'), TREEHOUSE_VCS='git',
+        self.env.update(GOCOVERDIR=str(coverage), TREEHOUSE_ROOT=str(self.root / 'pools'), TREEHOUSE_VCS='git',
                         HOME=str(self.root / 'home'), XDG_CONFIG_HOME=str(self.root / 'config'))
         (self.root / 'home').mkdir()
         self.pool = Path(self.command('pool-dir').stdout.strip())
@@ -132,9 +134,9 @@ class Fixture:
         return subprocess.run([BINARY, *args], cwd=self.caller, env=self.env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
 
-    def start(self, label, hold='', path=''):
+    def start(self, label, hold='', path='', **environment):
         return subprocess.Popen([BINARY, 'get', '--lease', '--no-fetch', '--lease-holder', label],
-                                cwd=self.caller, env=dict(self.env, LAB_ID=label, LAB_HOLD=hold, LAB_TARGET=path),
+                                cwd=self.caller, env=dict(self.env, LAB_ID=label, LAB_HOLD=hold, LAB_TARGET=path, **environment),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def finish(self, proc):
@@ -263,6 +265,147 @@ def unfenced_identity():
         first.communicate()
 
 
+def function_entries(fixture, label, function):
+    # Go's execution counters observe actual function entries even when a pass
+    # skips every leased record without issuing any candidate Git call.
+    result = subprocess.run(['go', 'tool', 'covdata', 'debugdump',
+                             '-i='+str(fixture.root/('coverage-'+label)),
+                             '-pkg=github.com/kunchenguid/treehouse/v3/internal/pool'],
+                            check=True, capture_output=True, text=True)
+    (fixture.root/('coverage-'+label+'.txt')).write_text(result.stdout)
+    match = re.search(r'^Func: '+re.escape(function)+r'\nSrcfile: [^\n]+\nLiteral: false\n0: [^\n]+ = (\d+)$',
+                      result.stdout, re.MULTILINE)
+    assert match, ('missing execution counter; build the CLI with -cover -covermode=atomic', function, result.stdout)
+    return int(match[1])
+
+
+def second_pass(guarded=False):
+    f = Fixture(2, foreign=True)
+    # Exactly N-1 records: own-clone slot 1 has a durable lease held by a live
+    # tenant, slot 2 is idle foreign X, and max_trees is N=3.
+    git(f.repo, 'worktree', 'remove', f.paths[0])
+    git(f.caller, 'worktree', 'add', '--detach', f.paths[0], 'main')
+    (f.caller/'treehouse.toml').write_text('max_trees = 3\n')
+    tenant = subprocess.Popen([sys.executable, '-c',
+                              "import sys; print('OWNER_READY',flush=True); sys.stdin.read()"],
+                             cwd=f.paths[0], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    processes = []
+    connections = []
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(f.socket_path)); server.listen()
+    try:
+        assert tenant.stdout.readline().strip() == 'OWNER_READY'
+        leased = f.command('lease', '1', '--lease-holder', 'live owner '+str(tenant.pid))
+        assert leased.returncode == 0, leased.stderr
+        initial = f.state()
+        assert len(initial) == 2 and initial[0]['leased'] and not initial[1].get('leased'), initial
+        x = f.paths[1]
+        for label in ('A', 'B'):
+            coverage = f.root/('coverage-'+label)
+            coverage.mkdir()
+            proc = f.start(label, 'preclaim', x, GOCOVERDIR=str(coverage))
+            processes.append(proc)
+            connection, _ = server.accept()
+            connections.append(connection)
+            assert connection.recv(1) == b'H'
+            assert not f.locked() and f.state() == initial, 'initial snapshot was not below the cap'
+            # Reaching X's first identity query proves that this get has read
+            # its initial table. No writer changes that table before both gates.
+            (f.root/('initial-state-'+label+'.json')).write_text(json.dumps(initial))
+            record('TG2 second-pass '+label+' initial view: N=3 records=2 X=2 idle; slot1 leased live pid='+str(tenant.pid)+'; fixture='+str(f.root))
+        connections[0].sendall(b'R'); connections[0].close(); connections[0] = None
+        a_out, a_err = processes[0].communicate()
+        a_path = str(f.pool/'3'/'repo')
+        assert processes[0].returncode == 0 and a_out == a_path+'\n', (a_out, a_err)
+        at_cap = f.state()
+        assert len(at_cap) == 3 and at_cap[0] == initial[0] and at_cap[1] == initial[1], at_cap
+        assert at_cap[2]['path'] == a_path and at_cap[2]['leased'] and at_cap[2]['lease_holder'] == 'A'
+        assert tenant.poll() is None and processes[1].poll() is None
+        assert not any('worktree' in e['args'] and 'remove' in e['args'] and x in e['args'] for e in f.events())
+        if guarded:
+            protected = f.command('lease', '2', '--lease-holder', 'protect foreign X')
+            assert protected.returncode == 0, protected.stderr
+            at_cap = f.state()
+        connections[1].sendall(b'R'); connections[1].close(); connections[1] = None
+        b_out, b_err = processes[1].communicate()
+        (f.root/'A.stderr').write_text(a_err)
+        (f.root/'B.stderr').write_text(b_err)
+        state = f.state()
+        # The real CLI outcomes establish legitimate completion and safety;
+        # the independent entry counters additionally reject finite extra scans.
+        if guarded:
+            assert processes[1].returncode != 0 and not b_out and 'all 3 worktrees are in use' in b_err, ('TG2 guarded second pass must refuse capacity', b_out, b_err)
+            assert state == at_cap and Path(x).exists(), ('TG2 guarded second pass changed X or its reservation', state, at_cap)
+            assert (Path(x)/'README').read_text() == 'recognizable original\n'
+        else:
+            b_path = str(f.pool/'4'/'repo')
+            assert processes[1].returncode == 0 and b_out == b_path+'\n', ('TG2 second get did not reclaim X', b_out, b_err)
+            assert not Path(x).exists() and len(state) == 3 and state[0] == initial[0], state
+            retained = {entry['path']:entry for entry in state}
+            assert retained[a_path] == at_cap[2], ('TG2 second get lost A reservation', state)
+            assert retained[b_path]['leased'] and retained[b_path]['lease_holder'] == 'B'
+            assert retained[a_path]['lease_id'] != retained[b_path]['lease_id']
+        for label, stderr in (('A', a_err), ('B', b_err)):
+            rows = [row for row in progress_rows(stderr) if row[0] == x]
+            assert len(rows) == 1 and rows[0][1] == 'refused' and 'other clone' in rows[0][2], ('TG8 second-pass duplicate or incorrect X completion', label, rows)
+        removals = [e for e in f.events() if 'worktree' in e['args'] and 'remove' in e['args'] and x in e['args']]
+        assert len(removals) == (0 if guarded else 1) and all(e['run'] == 'B' for e in removals), removals
+        assert function_entries(f, 'A', 'reclaimForeignWorktree') == 0, 'A entered reclamation below the cap'
+        assert function_entries(f, 'B', 'claimFresh') == 1, 'B did not attempt the fresh claim exactly once'
+        passes = function_entries(f, 'B', 'reclaimForeignWorktree')
+        assert passes == 1, ('TG2 second reclamation pass entry count', passes, guarded)
+        assert function_entries(f, 'B', 'reserveFresh') == (1 if guarded else 2), 'unexpected capacity-claim path'
+        record('TG2 second-pass guarded='+str(guarded)+' B fresh claim nil at 3 records; reclamation entries='+str(passes)+' removals='+str(len(removals))+'; retained distinct leases or exact protected state; TG8 X reported once; fixture='+str(f.root))
+    finally:
+        for connection in connections:
+            if connection is not None:
+                connection.sendall(b'R'); connection.close()
+        server.close()
+        for proc in processes:
+            if proc.poll() is None: proc.kill()
+            proc.communicate()
+        tenant.kill(); tenant.communicate()
+
+
+def fenced_return():
+    f = Fixture(1)
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(f.socket_path)); server.listen()
+    first = f.start('fenced-get', 'selection', f.paths[0])
+    connection = None
+    try:
+        connection, _ = server.accept()
+        assert connection.recv(1) == b'H' and not f.locked()
+        before = f.state()
+        contents = (Path(f.paths[0])/'README').read_bytes()
+        result = f.command('return', '--all', '--force')
+        assert result.returncode == 1, ('fenced-only return --all must fail', result.returncode, result.stdout, result.stderr)
+        assert '1 failed:' in result.stderr and 'acquisition in progress' in result.stderr, result.stderr
+        assert 'Returned 0 of 1 held worktree(s); 0 skipped' in result.stderr, result.stderr
+        assert first.poll() is None and f.state() == before, 'return waited for or changed the fenced get'
+        assert (Path(f.paths[0])/'README').read_bytes() == contents
+        connection.sendall(b'R'); connection.close(); connection = None
+        assert f.finish(first) == f.paths[0]
+        state = f.state()
+        assert len(state) == 1 and state[0]['leased'] and state[0]['lease_holder'] == 'fenced-get', state
+        record('TG6 return --all: fenced-only run exits 1 without waiting or changing state/content; original get publishes its lease; fixture='+str(f.root))
+    finally:
+        if connection is not None: connection.sendall(b'R'); connection.close()
+        server.close()
+        if first.poll() is None: first.kill()
+        first.communicate()
+
+
+def candidate_path(event, paths):
+    # Clone identity probes run from the caller, not inside an unfenced slot.
+    # Attribute their explicit Git directory as well as ordinary slot-cwd calls.
+    for path in paths:
+        if event['cwd'] == path or '--git-dir='+str(Path(path)/'.git') in event['args']:
+            return path
+    return None
+
+
 def walk(count=90, foreign=False):
     f = Fixture(count, foreign=foreign, rejected=count-1)
     started = time.monotonic()
@@ -271,14 +414,15 @@ def walk(count=90, foreign=False):
     elapsed = time.monotonic()-started
     assert result.returncode == 0, result.stderr
     events = f.events()
-    candidates = [event for event in events if event['cwd'] in f.paths]
+    candidates = [event for event in events if candidate_path(event, f.paths) is not None]
     assert candidates, 'empty candidate trace'
     locked = [event for event in candidates if event['status'] == 'LOCKED']
     assert bool(locked) == ARGS.base, ('TG1 unexpected candidate lock', locked[:3])
     visited = []
     for event in candidates:
-        if 'status' in event['args'] and event['cwd'] not in visited:
-            visited.append(event['cwd'])
+        path = candidate_path(event, f.paths)
+        if 'status' in event['args'] and path not in visited:
+            visited.append(path)
     if not foreign:
         assert visited == f.paths, ('walk did not visit ordered candidates',visited)
         trees = {}
@@ -571,6 +715,10 @@ try:
         incremental_progress(foreign=True)
         incremental_progress()
     if ARGS.only == 'first-copy': initial_allocations()
+    if ARGS.only in ['all','second-pass'] and not ARGS.base:
+        second_pass()
+        second_pass(guarded=True)
+    if ARGS.only in ['all','return-fenced'] and not ARGS.base: fenced_return()
     if ARGS.only in ['all','cache-failure']: failed_tree()
 finally:
     SOCKET_ROOT.cleanup()

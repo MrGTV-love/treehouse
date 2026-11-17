@@ -16,7 +16,7 @@ PARSER = argparse.ArgumentParser()
 PARSER.add_argument('binary')
 PARSER.add_argument('--base', action='store_true')
 PARSER.add_argument('--evidence')
-PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress'], default='all')
+PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress','independent-below'], default='all')
 ARGS = PARSER.parse_args()
 BINARY = str(Path(ARGS.binary).resolve())
 REAL_GIT = shutil.which('git')
@@ -156,9 +156,11 @@ class Fixture:
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
 
-def concurrent(kind, count, spare):
+def concurrent(kind, count, spare, extra_capacity=0):
     foreign = kind.startswith('foreign')
     f = Fixture(count + spare, foreign=foreign)
+    if extra_capacity:
+        (f.caller/'treehouse.toml').write_text('max_trees = '+str(count + spare + extra_capacity)+'\n')
     server = socket.socket(socket.AF_UNIX)
     server.bind(str(f.socket_path)); server.listen()
     processes = []
@@ -175,6 +177,10 @@ def concurrent(kind, count, spare):
         if not ARGS.base:
             paths = [f.finish(proc) for proc in others]
             assert first.poll() is None, 'first was not still held'
+            if not foreign:
+                assert set(paths) <= set(f.paths[1:]), ('TG2 did not return pre-existing independent capacity', paths, f.paths)
+                assert len(f.state()) == count + spare, ('TG2 changed record count while first held', len(f.state()), count + spare)
+                record('TG2 existing independent slots selected while first held; record count='+str(len(f.state()))+' extra_capacity='+str(extra_capacity)+' fixture='+str(f.root))
             record('TG2 '+kind+' '+str(count)+': other gets completed while first held: '+repr(paths))
         else:
             record('TG2 BASE '+kind+': kernel lock excludes second get until release')
@@ -188,6 +194,8 @@ def concurrent(kind, count, spare):
         assert all(reserved[path].get('lease_id') for path in paths)
         further = f.command('get', '--lease', '--no-fetch')
         if spare:
+            assert further.returncode == 0 and further.stdout.strip() not in paths, (further.stdout, further.stderr)
+        elif extra_capacity:
             assert further.returncode == 0 and further.stdout.strip() not in paths, (further.stdout, further.stderr)
         else:
             assert further.returncode != 0 and not further.stdout.strip(), (further.stdout, further.stderr)
@@ -249,11 +257,15 @@ def walk(count=90, foreign=False):
             if event.get('tree'):
                 trees[event['tree']] = trees.get(event['tree'], 0)+1
         assert trees
+        target_tree = git(f.repo, 'rev-parse', 'HEAD^{tree}', output=True)
+        target_calls = trees.get(target_tree, 0)
+        assert target_calls > 0, ('TG3 reset-target listing was not observed', target_tree, trees)
         if not ARGS.base:
-            assert max(trees.values()) <= 1, ('TG3 duplicate immutable tree listing',trees)
+            assert target_calls <= 1, ('TG3 duplicate reset-target tree listing', target_tree, target_calls)
         else:
-            assert max(trees.values()) >= count-1, ('baseline did not discriminate',trees)
-        record('TG3 ordered candidates='+str(len(visited))+' tree counts='+repr(trees)+' fixture='+str(f.root))
+            assert target_calls >= count-1, ('baseline did not discriminate target-tree bound', target_tree, target_calls)
+        other_trees = {tree:calls for tree,calls in trees.items() if tree != target_tree}
+        record('TG3 ordered candidates='+str(len(visited))+' target tree='+target_tree+' target listings='+str(target_calls)+' other tree counts (diagnostic only)='+repr(other_trees)+' fixture='+str(f.root))
     else:
         assert any('rev-list' in e['args'] for e in events), 'foreign final-removal proof unvisited'
         assert sum('ls-files' in e['args'] for e in candidates) >= 20, 'foreign rejection walk unvisited'
@@ -513,6 +525,8 @@ try:
         concurrent('selection',8,1)
         exclusive('selection')
         exclusive('foreign-selection')
+    if ARGS.only in ['all','concurrent','independent-below']:
+        concurrent('selection',2,0,extra_capacity=1)
     if ARGS.only in ['all','safety']: safety()
     if ARGS.only in ['all','progress']:
         incremental_progress(foreign=True)

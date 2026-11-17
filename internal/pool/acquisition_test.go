@@ -133,15 +133,30 @@ func TestAcquireForeignSelectionSnapshotOutsidePoolLock(t *testing.T) {
 		runGit(t, path, "add", "README.md")
 		runGit(t, path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "unlanded")
 	}
-	oldSnapshot, oldFinal := snapshotWorktreeProcesses, findProcessesInWorktree
-	calls, finals, locked := 0, 0, 0
+	oldSnapshot, oldFinal, oldStage := snapshotWorktreeProcesses, findProcessesInWorktree, acquisitionStage
+	ownSelections, foreignSelections, finals, locked := 0, 0, 0, 0
+	inForeignWalk := false
+	acquisitionStage = func(stage, path string) {
+		// Every candidate in this fixture belongs to the other clone, so no
+		// own-clone screening claim can reach this hook.
+		if stage == "screening" {
+			inForeignWalk = true
+		}
+		oldStage(stage, path)
+	}
 	snapshotWorktreeProcesses = func() (process.WorktreeSnapshot, error) {
-		calls++
+		walk := "own"
+		if inForeignWalk {
+			foreignSelections++
+			walk = "foreign"
+		} else {
+			ownSelections++
+		}
 		status := probePoolLock(t, pool)
 		if status != "FREE" {
 			locked++
 		}
-		t.Logf("%s foreign selection enumeration %d", status, calls)
+		t.Logf("%s %s selection enumeration own=%d foreign=%d", status, walk, ownSelections, foreignSelections)
 		return oldSnapshot()
 	}
 	findProcessesInWorktree = func(path string) ([]process.ProcessInfo, error) {
@@ -153,15 +168,20 @@ func TestAcquireForeignSelectionSnapshotOutsidePoolLock(t *testing.T) {
 		t.Logf("%s foreign final enumeration %d slot=%s", status, finals, path)
 		return oldFinal(path)
 	}
-	t.Cleanup(func() { snapshotWorktreeProcesses = oldSnapshot; findProcessesInWorktree = oldFinal })
+	t.Cleanup(func() {
+		snapshotWorktreeProcesses = oldSnapshot
+		findProcessesInWorktree = oldFinal
+		acquisitionStage = oldStage
+	})
 	got, err := AcquireLeaseInfoWithOptions(caller, pool, 21, nil, "foreign selection", AcquireOptions{SkipFetch: true})
 	if err != nil || got.Path == "" {
 		t.Fatalf("foreign get: %#v %v", got, err)
 	}
 	assertCloneCommonDir(t, got.Path, caller)
-	if calls != 1 || finals != 1 || locked != 0 {
-		t.Fatalf("foreign selection snapshots=%d final scans=%d locked=%d", calls, finals, locked)
+	if ownSelections > 1 || foreignSelections > 1 || ownSelections+foreignSelections == 0 || finals != 1 || locked != 0 {
+		t.Fatalf("foreign walk snapshot bound: own=%d foreign=%d final=%d locked=%d", ownSelections, foreignSelections, finals, locked)
 	}
+	t.Logf("shared-cap fixture: own enumerations=%d foreign fresh enumerations=%d final scans=%d; shared selection evidence retained", ownSelections, foreignSelections, finals)
 }
 
 func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
@@ -443,6 +463,131 @@ func TestAcquireLateCLILeaseTakeover(t *testing.T) {
 		}
 	} else if err != nil || got != paths[0] {
 		t.Fatalf("unchanged claim failed: %q %v", got, err)
+	}
+}
+
+func TestAcquireOwnerReplacementHelper(t *testing.T) {
+	if os.Getenv("TREEHOUSE_OWNER_REPLACEMENT_HELPER") != "1" {
+		return
+	}
+	path, err := AcquireWithOptions(os.Getenv("TREEHOUSE_FIXTURE_REPO"), os.Getenv("TREEHOUSE_FIXTURE_POOL"), 2, nil, AcquireOptions{SkipFetch: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(path); err != nil {
+		t.Fatal(err)
+	}
+	// Keep this different owner's PID/birth reservation alive until the parent
+	// has checked the checkout after the interrupted acquisition resumes.
+	_, _ = bufio.NewReader(os.Stdin).ReadByte()
+}
+
+func TestAcquireReleaseThenOwnerReclaim(t *testing.T) {
+	for _, writer := range []string{"Release", "ReleaseConditional"} {
+		t.Run(writer, func(t *testing.T) {
+			repo, pool, paths := acquisitionFixture(t, 2)
+			// A wants a newer target, but an unconditional return and B's get
+			// both park at main. B therefore retains A's observed HEAD, so Git's
+			// HEAD-change check cannot hide an owner-reservation takeover bug.
+			runGit(t, repo, "checkout", "-b", "a-target")
+			if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("A reset target\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, repo, "add", "README.md")
+			runGit(t, repo, "commit", "-m", "A target")
+			runGit(t, repo, "checkout", "main")
+			oldStage := acquisitionStage
+			visited, released := false, false
+			var replacement WorktreeEntry
+			acquisitionStage = func(stage, path string) {
+				if stage != "reset" || path != paths[0] || visited {
+					return
+				}
+				visited = true
+				assertPoolUnlocked(t, pool)
+				before, err := ReadState(pool)
+				if err != nil {
+					t.Fatal(err)
+				}
+				original := reservationOf(before.Worktrees[0])
+				if writer == "Release" {
+					err = Release(pool, path)
+				} else {
+					err = ReleaseConditional(pool, path, "", ReleasePreconditions{}, nil)
+				}
+				released = err == nil
+				afterRelease, err := ReadState(pool)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !released && reservationOf(afterRelease.Worktrees[0]) != original {
+					t.Fatal("refused release changed A's claim")
+				}
+				child := exec.Command(os.Args[0], "-test.run=^TestAcquireOwnerReplacementHelper$")
+				child.Dir = repo
+				child.Env = append(os.Environ(), "TREEHOUSE_OWNER_REPLACEMENT_HELPER=1", "TREEHOUSE_FIXTURE_REPO="+repo, "TREEHOUSE_FIXTURE_POOL="+pool)
+				out, err := child.StdoutPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				input, err := child.StdinPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := child.Start(); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { input.Close(); child.Wait() })
+				line, err := bufio.NewReader(out).ReadString('\n')
+				var replacementPath string
+				if err != nil || json.Unmarshal([]byte(line), &replacementPath) != nil {
+					t.Fatalf("replacement owner readiness: %q %v", line, err)
+				}
+				expected := paths[1]
+				if released {
+					expected = paths[0]
+				}
+				if replacementPath != expected {
+					t.Fatalf("replacement did not claim expected existing capacity: got=%s want=%s released=%t", replacementPath, expected, released)
+				}
+				state, err := ReadState(pool)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range state.Worktrees {
+					if entry.Path == replacementPath {
+						replacement = entry
+					}
+				}
+				if replacement.Leased || replacement.LeaseID != "" || replacement.OwnerPID != int32(child.Process.Pid) || replacement.OwnerStartedAt == 0 || replacement.OwnerPID == original.OwnerPID {
+					t.Fatalf("replacement is not a distinct live default owner: %#v original=%#v", replacement, original)
+				}
+				assertFileContents(t, filepath.Join(replacementPath, "README.md"), "hi\n")
+				t.Logf("%s released=%t; replacement owner=%d/%d path=%s; lease fields remain false/empty", writer, released, replacement.OwnerPID, replacement.OwnerStartedAt, replacement.Path)
+			}
+			t.Cleanup(func() { acquisitionStage = oldStage })
+			got, acquireErr := AcquireWithOptions(repo, pool, 2, nil, AcquireOptions{SkipFetch: true, BaseBranch: "a-target"})
+			if !visited || replacement.Path == "" {
+				t.Fatal("release/reclaim schedule was not visited")
+			}
+			state, err := ReadState(pool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, entry := range state.Worktrees {
+				if entry.Path == replacement.Path {
+					found = reservationOf(entry) == reservationOf(replacement)
+				}
+			}
+			data, fileErr := os.ReadFile(filepath.Join(replacement.Path, "README.md"))
+			if !found || fileErr != nil || string(data) != "hi\n" || got == replacement.Path {
+				t.Fatalf("A acted on replacement owner: contents=%q reservationRetained=%t replacement=%#v Apath=%s Aerror=%v read=%v", data, found, replacement, got, acquireErr, fileErr)
+			}
+			if !released && (acquireErr != nil || got != paths[0]) {
+				t.Fatalf("unchanged fenced acquisition failed: %s %v", got, acquireErr)
+			}
+		})
 	}
 }
 

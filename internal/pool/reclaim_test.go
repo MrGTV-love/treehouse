@@ -147,11 +147,10 @@ func TestAcquire_ForeignReclamationRefusesUnsafeSlots(t *testing.T) {
 						if risk == "process-scan-failure" {
 							return nil, errors.New("process table unavailable")
 						}
-						if risk == "late-process" && calls == 1 {
-							return nil, nil
-						}
 						if risk == "late-hidden-edits" || risk == "late-skip-worktree-edits" {
-							if calls == 2 {
+							// Selection now uses one shared snapshot. This per-slot scan
+							// is the final pre-removal check, after that snapshot.
+							if calls == 1 {
 								flag := "--assume-unchanged"
 								if risk == "late-skip-worktree-edits" {
 									flag = "--skip-worktree"
@@ -300,7 +299,14 @@ func TestAcquire_ForeignReclamationStateWriteFailureStopsBeforeCreation(t *testi
 		t.Fatal(err)
 	}
 	oldWrite := writeState
-	writeState = func(string, State) error { return errors.New("state write failed") }
+	writeState = func(pool string, state State) error {
+		// Claim writes now precede screening. Fail the deletion commit itself,
+		// preserving the obligation that it must abort before fresh creation.
+		if len(state.Worktrees) == 0 {
+			return errors.New("state write failed")
+		}
+		return oldWrite(pool, state)
+	}
 	t.Cleanup(func() { writeState = oldWrite })
 	got, err := Acquire(caller, poolDir, 1, nil)
 	if err == nil || got != "" {
@@ -431,7 +437,9 @@ func TestAcquire_ForeignReclamationPreservesReplacementTree(t *testing.T) {
 							return oldScan(candidate)
 						}
 						calls++
-						if calls == 2 {
+						// Selection now uses one shared snapshot. This per-slot scan
+						// is the final pre-removal check, after that snapshot.
+						if calls == 1 {
 							runGit(t, path, "replace", base, different)
 							runGit(t, path, "read-tree", "--reset", "-u", base)
 						}
@@ -466,7 +474,7 @@ func TestAcquire_ForeignReclamationPreservesReplacementTree(t *testing.T) {
 				if got := gitOut(t, path, "rev-parse", namespace+base); got != different {
 					t.Fatalf("refusal changed replacement ref: %s != %s", got, different)
 				}
-				if strings.HasPrefix(replacement, "late-") && calls != 2 {
+				if strings.HasPrefix(replacement, "late-") && calls != 1 {
 					t.Fatalf("replacement missed final preflight: scans=%d", calls)
 				}
 			})
@@ -545,7 +553,9 @@ func TestAcquire_ForeignReclamationAuthenticatesIgnoredPaths(t *testing.T) {
 							return oldScan(candidate)
 						}
 						calls++
-						if calls == 2 {
+						// Selection now uses one shared snapshot. This per-slot scan
+						// is the final pre-removal check, after that snapshot.
+						if calls == 1 {
 							writeExtra()
 						}
 						return nil, nil
@@ -584,7 +594,7 @@ func TestAcquire_ForeignReclamationAuthenticatesIgnoredPaths(t *testing.T) {
 				if seeded && risk != "nested" {
 					assertFileContents(t, filepath.Join(path, "local", "config.env"), "authenticated seed\n")
 				}
-				if strings.HasPrefix(risk, "late-") && calls != 2 {
+				if strings.HasPrefix(risk, "late-") && calls != 1 {
 					t.Fatalf("ignored writer missed final preflight: scans=%d", calls)
 				}
 			})
@@ -668,7 +678,9 @@ func TestAcquire_ForeignReclamationSkipsGitRemovalRefusals(t *testing.T) {
 							return oldScan(candidate)
 						}
 						calls++
-						if calls == 2 {
+						// Selection now uses one shared snapshot. This per-slot scan
+						// is the final pre-removal check, after that snapshot.
+						if calls == 1 {
 							if risk == "late-lock" {
 								runGit(t, foreign, "worktree", "lock", "--reason", "late protection", first)
 							} else {
@@ -715,7 +727,7 @@ func TestAcquire_ForeignReclamationSkipsGitRemovalRefusals(t *testing.T) {
 						t.Fatalf("retained modules metadata was not preserved: %v", err)
 					}
 				}
-				if strings.HasPrefix(risk, "late-") && calls != 2 {
+				if strings.HasPrefix(risk, "late-") && calls != 1 {
 					t.Fatalf("late protection missed final preflight: scans=%d", calls)
 				}
 			})

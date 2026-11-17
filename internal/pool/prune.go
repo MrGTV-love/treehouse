@@ -455,6 +455,9 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 				continue
 			}
 
+			if err := slotWritable(poolDir, state.Worktrees[i].Name); err != nil {
+				continue
+			}
 			worktree, skipped, stale, context, err := analyzePruneCandidate(poolDir, fixedPruneContextResolver(plannedWorktree.Context), state.Worktrees[i], options)
 			if err != nil {
 				return err

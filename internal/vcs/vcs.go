@@ -594,6 +594,18 @@ func IsWorktreeSafeToReset(worktreePath, branch string) (bool, string, string, e
 	return backendForWorktree(worktreePath).IsWorktreeSafeToReset(worktreePath, branch)
 }
 
+// NewResetChecker shares immutable Git tree listings across one candidate walk.
+// Other backends keep their existing reset-safety semantics.
+func NewResetChecker() func(string, string) (bool, string, string, error) {
+	gitCheck := gitvcs.NewResetChecker()
+	return func(path, branch string) (bool, string, string, error) {
+		if WorktreeBackendName(path) == "git" {
+			return gitCheck(path, branch)
+		}
+		return IsWorktreeSafeToReset(path, branch)
+	}
+}
+
 // DetachWorktree releases any branch the worktree has checked out.
 func DetachWorktree(worktreePath string) error {
 	b, err := destructiveBackendForWorktree(worktreePath)

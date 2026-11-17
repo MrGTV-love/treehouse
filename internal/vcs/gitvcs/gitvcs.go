@@ -1682,6 +1682,10 @@ func IsHeadMergedIntoDefault(repoRoot, worktreePath string) (bool, string, error
 // detects a squash merge without treating unrelated target-branch changes as a
 // mismatch.
 func IsHeadMergedIntoRef(worktreePath, ref string) (bool, error) {
+	return headMergedWithReader(worktreePath, ref, readTree)
+}
+
+func headMergedWithReader(worktreePath, ref string, reader func(string, string) (map[string]string, error)) (bool, error) {
 	cmd := exec.Command("git", "merge-base", "--is-ancestor", "HEAD", ref)
 	cmd.Dir = worktreePath
 	out, err := cmd.CombinedOutput()
@@ -1689,12 +1693,12 @@ func IsHeadMergedIntoRef(worktreePath, ref string) (bool, error) {
 		return true, nil
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-		return isHeadContentMergedIntoRef(worktreePath, ref)
+		return headContentMergedWithReader(worktreePath, ref, reader)
 	}
 	return false, fmt.Errorf("git merge-base --is-ancestor HEAD %s: %s", ref, strings.TrimSpace(string(out)))
 }
 
-func isHeadContentMergedIntoRef(worktreePath, ref string) (bool, error) {
+func headContentMergedWithReader(worktreePath, ref string, readTree func(string, string) (map[string]string, error)) (bool, error) {
 	cmd := exec.Command("git", "merge-base", "HEAD", ref)
 	cmd.Dir = worktreePath
 	out, err := cmd.CombinedOutput()
@@ -1745,6 +1749,48 @@ func isHeadContentMergedIntoRef(worktreePath, ref string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// NewResetChecker scopes immutable tree listings to one acquisition. Cache by
+// repository and tree object, never a mutable ref such as HEAD or main.
+func NewResetChecker() func(string, string) (bool, string, string, error) {
+	type treeKey struct{ repository, object string }
+	type treeRead struct {
+		entries map[string]string
+		err     error
+	}
+	trees := make(map[treeKey]treeRead)
+	reader := func(dir, ref string) (map[string]string, error) {
+		id, err := runGit(dir, "rev-parse", "--verify", ref+"^{tree}")
+		if err != nil {
+			return nil, err
+		}
+		common, err := CommonGitDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		key := treeKey{repository: common, object: id}
+		if tree, ok := trees[key]; ok {
+			return tree.entries, tree.err
+		}
+		tree, err := readTree(dir, id)
+		// A failed immutable read is still one attempt for this acquisition.
+		// Repeating it for each candidate adds cost without a new safety proof.
+		trees[key] = treeRead{entries: tree, err: err}
+		return tree, err
+	}
+	return func(dir, branch string) (bool, string, string, error) {
+		ref, err := resolveResetRef(dir, branch)
+		if err != nil {
+			return false, "", "", err
+		}
+		head, err := worktreeHead(dir)
+		if err != nil {
+			return false, "", "", err
+		}
+		safe, err := headMergedWithReader(dir, ref, reader)
+		return safe, ref, head, err
+	}
 }
 
 func readTree(repoRoot, ref string) (map[string]string, error) {

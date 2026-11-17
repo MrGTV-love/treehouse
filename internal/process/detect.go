@@ -43,11 +43,38 @@ func StartedAt(pid int32) (int64, bool) {
 // FindProcessesInWorktree returns processes whose current directory is the
 // worktree root or a descendant after filesystem spelling and symlink resolution.
 func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
+	snapshot, err := SnapshotWorktreeProcesses()
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.InWorktree(worktreePath)
+}
+
+type processCwd struct {
+	process *process.Process
+	cwd     string
+}
+
+// WorktreeSnapshot is one process enumeration for acquisition selection. A
+// claimed slot must still be checked again immediately before checkout work.
+type WorktreeSnapshot []processCwd
+
+func SnapshotWorktreeProcesses() (WorktreeSnapshot, error) {
 	procs, err := process.Processes()
 	if err != nil {
 		return nil, err
 	}
+	result := make(WorktreeSnapshot, 0, len(procs))
+	for _, p := range procs {
+		cwd, err := p.Cwd()
+		if err == nil && cwd != "" {
+			result = append(result, processCwd{p, cwd})
+		}
+	}
+	return result, nil
+}
 
+func (snapshot WorktreeSnapshot) InWorktree(worktreePath string) ([]ProcessInfo, error) {
 	absWorktree, err := filepath.Abs(worktreePath)
 	if err != nil {
 		return nil, err
@@ -56,12 +83,9 @@ func FindProcessesInWorktree(worktreePath string) ([]ProcessInfo, error) {
 
 	var result []ProcessInfo
 
-	for _, p := range procs {
-		cwd, err := p.Cwd()
-		if err != nil {
-			continue
-		}
-		if !cwdWithinWorktree(absWorktree, cwd) {
+	for _, captured := range snapshot {
+		p := captured.process
+		if !cwdWithinWorktree(absWorktree, captured.cwd) {
 			continue
 		}
 		name, _ := p.Name()

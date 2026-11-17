@@ -811,7 +811,7 @@ func TestAcquire_FinalStateWriteFailurePreservesSeedInventoryForRecovery(t *test
 	}
 }
 
-func TestAcquire_InitialStateWriteFailureRecoversCreatedWorktree(t *testing.T) {
+func TestAcquire_InitialStateWriteFailureCreatesNoWorktree(t *testing.T) {
 	repoDir, poolDir := setupLocalRepo(t)
 	oldWriteState := writeState
 	writeState = func(string, State) error { return errors.New("state write failed") }
@@ -828,8 +828,13 @@ func TestAcquire_InitialStateWriteFailureRecoversCreatedWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Worktrees) != 1 || !state.Worktrees[0].Leased || state.Worktrees[0].LeaseHolder != RecoveredLeaseHolder {
-		t.Fatalf("created worktree was not conservatively recovered: %#v", state.Worktrees)
+	// Creation now requires a persisted provisional claim first. A failed
+	// initial write must leave neither an unrecorded checkout nor a seed.
+	if len(state.Worktrees) != 0 {
+		t.Fatalf("failed claim created state: %#v", state.Worktrees)
+	}
+	if _, err := os.Stat(filepath.Join(poolDir, "1", filepath.Base(repoDir))); !os.IsNotExist(err) {
+		t.Fatalf("failed claim created a worktree: %v", err)
 	}
 }
 
@@ -865,7 +870,9 @@ func TestAcquire_ReusedFinalStateWriteFailureQuarantinesNewSeeds(t *testing.T) {
 
 	oldWriteState := writeState
 	writeState = func(poolDir string, state State) error {
-		if len(state.Worktrees) == 1 && state.Worktrees[0].OwnerPID != 0 {
+		// A reuse also writes an owner claim before touching seeds. Fail the
+		// final state carrying the new inventory, not that earlier reservation.
+		if len(state.Worktrees) == 1 && state.Worktrees[0].OwnerPID != 0 && reflect.DeepEqual(state.Worktrees[0].SeededPaths, []string{"secret.env"}) {
 			return errors.New("state write failed")
 		}
 		return oldWriteState(poolDir, state)
@@ -931,10 +938,12 @@ func TestAcquire_ReusedRepeatedStateWriteFailureKeepsSeedInventoryUnknown(t *tes
 	runGit(t, repoDir, "commit", "-m", "replace seed")
 
 	oldWriteState := writeState
-	writes := 0
+	failedFinal := false
 	writeState = func(poolDir string, state State) error {
-		writes++
-		if writes > 1 {
+		if len(state.Worktrees) == 1 && state.Worktrees[0].OwnerPID != 0 && reflect.DeepEqual(state.Worktrees[0].SeededPaths, []string{"secret.env"}) {
+			failedFinal = true
+		}
+		if failedFinal {
 			return errors.New("state write failed")
 		}
 		return oldWriteState(poolDir, state)
@@ -1024,13 +1033,13 @@ func TestAcquire_ReusedCommittedFinalStateWriteErrorReturnsAcquisition(t *testin
 	}
 
 	oldWriteState := writeState
-	writes := 0
+	committedFinal := false
 	writeState = func(poolDir string, state State) error {
-		writes++
 		if err := oldWriteState(poolDir, state); err != nil {
 			return err
 		}
-		if writes == 2 {
+		if len(state.Worktrees) == 1 && state.Worktrees[0].OwnerPID != 0 && reflect.DeepEqual(state.Worktrees[0].SeededPaths, []string{"secret.env"}) {
+			committedFinal = true
 			return errors.New("directory sync failed after commit")
 		}
 		return nil
@@ -1040,6 +1049,9 @@ func TestAcquire_ReusedCommittedFinalStateWriteErrorReturnsAcquisition(t *testin
 	reused, err := Acquire(repoDir, poolDir, 1, nil)
 	if err != nil {
 		t.Fatalf("Acquire failed after its final state was committed: %v", err)
+	}
+	if !committedFinal {
+		t.Fatal("did not exercise the committed final state")
 	}
 	if reused != wtPath {
 		t.Fatalf("got worktree %s, want reused %s", reused, wtPath)
@@ -1054,7 +1066,7 @@ func TestAcquire_ReusedCommittedFinalStateWriteErrorReturnsAcquisition(t *testin
 }
 
 func TestAcquire_NewCommittedStateWriteErrorsReturnLease(t *testing.T) {
-	for _, failAt := range []int{1, 2} {
+	for _, failAt := range []int{1, 2, 3} {
 		t.Run(fmt.Sprintf("write-%d", failAt), func(t *testing.T) {
 			repoDir, poolDir := setupLocalRepo(t)
 			oldWriteState := writeState
@@ -1074,6 +1086,9 @@ func TestAcquire_NewCommittedStateWriteErrorsReturnLease(t *testing.T) {
 			lease, err := AcquireLeaseInfo(repoDir, poolDir, 1, nil, "test-holder")
 			if err != nil {
 				t.Fatalf("AcquireLeaseInfo failed after state was committed: %v", err)
+			}
+			if writes < failAt {
+				t.Fatalf("write fault not exercised: %d writes, target %d", writes, failAt)
 			}
 			state, err := ReadState(poolDir)
 			if err != nil {

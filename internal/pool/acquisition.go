@@ -54,7 +54,11 @@ type acquisitionClaim struct {
 	fence   *os.File
 }
 
-func (c *acquisitionClaim) close() { c.fence.Close() }
+func (c *acquisitionClaim) close() {
+	if c.fence != nil {
+		c.fence.Close()
+	}
+}
 
 // Callers omit empty-pool creation, which checks no candidate. Every candidate
 // completion is reported immediately, once per path. Fixed reasons never
@@ -234,6 +238,8 @@ func (c *acquisitionClaim) replaceWithFresh(repoRoot string, poolSize, firstSlot
 			return fmt.Errorf("worktree %s reservation changed during acquisition", c.entry.Name)
 		}
 		state.Worktrees = append(state.Worktrees[:index], state.Worktrees[index+1:]...)
+		c.fence.Close()
+		c.fence = nil
 		fresh, freshErr := reserveFresh(repoRoot, c.poolDir, &state, poolSize, firstSlot, opts)
 		if fresh == nil {
 			if err := persistState(c.poolDir, state); err != nil {

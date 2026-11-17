@@ -540,13 +540,17 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	if err != nil {
 		return LeaseInfo{}, err
 	}
+	acquisitionStage("snapshot", poolDir)
 	report := newCandidateProgress(opts.hookStderr)
 	selection, scanErr := snapshotWorktreeProcesses()
 	checkReset := vcs.NewResetChecker()
 	otherFlavor, otherClone, unverifiedClone := 0, 0, 0
-	mayReclaim := len(snapshot.Worktrees) == poolSize && identityErr == nil && wantFlavor == "git"
+	canReclaim := identityErr == nil && wantFlavor == "git"
+	mayReclaim := len(snapshot.Worktrees) == poolSize && canReclaim
 	var foreignCandidates []int
+	foreignPaths := make(map[string]bool)
 	deferForeign := func(index int) bool {
+		foreignPaths[snapshot.Worktrees[index].Path] = true
 		if !mayReclaim || !snapshot.Worktrees[index].SeedInventoryKnown {
 			return false
 		}
@@ -706,6 +710,34 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		claim, err = claimFresh(repoRoot, poolDir, poolSize, nextSlotNumber(snapshot), opts)
 		if err != nil {
 			return LeaseInfo{}, err
+		}
+	}
+	if claim == nil && !mayReclaim && canReclaim && len(foreignPaths) != 0 {
+		var current State
+		if err := WithStateLock(poolDir, func() error {
+			var err error
+			current, err = ReadState(poolDir)
+			return err
+		}); err != nil {
+			return LeaseInfo{}, err
+		}
+		var candidates []int
+		if len(current.Worktrees) == poolSize {
+			for index, wt := range current.Worktrees {
+				if foreignPaths[wt.Path] && wt.SeedInventoryKnown {
+					candidates = append(candidates, index)
+				}
+			}
+		}
+		if len(candidates) != 0 {
+			refusals, reclaimed, err := reclaimForeignWorktree(repoRoot, poolDir, poolSize, nextSlotNumber(current), current, candidates, commonDir, opts, selection, scanErr, report)
+			if err != nil {
+				return LeaseInfo{}, err
+			}
+			if len(refusals) > 0 {
+				reclaimDetails = ". Reclamation skipped: " + strings.Join(refusals, "; ")
+			}
+			claim = reclaimed
 		}
 	}
 	if claim == nil {

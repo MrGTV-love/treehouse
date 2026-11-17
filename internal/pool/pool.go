@@ -540,85 +540,161 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	if err != nil {
 		return LeaseInfo{}, err
 	}
+	report := newCandidateProgress(opts.hookStderr)
 	selection, scanErr := snapshotWorktreeProcesses()
 	checkReset := vcs.NewResetChecker()
 	otherFlavor, otherClone, unverifiedClone := 0, 0, 0
-	for _, wt := range snapshot.Worktrees {
-		if wt.Destroying || wt.Leased || ownerAlive(wt) {
+	mayReclaim := len(snapshot.Worktrees) == poolSize && identityErr == nil && wantFlavor == "git"
+	var foreignCandidates []int
+	deferForeign := func(index int) bool {
+		if !mayReclaim || !snapshot.Worktrees[index].SeedInventoryKnown {
+			return false
+		}
+		if foreignCandidates == nil {
+			foreignCandidates = make([]int, 0, len(snapshot.Worktrees)-index)
+		}
+		foreignCandidates = append(foreignCandidates, index)
+		return true
+	}
+	for candidateIndex, wt := range snapshot.Worktrees {
+		if wt.Destroying {
+			report(wt.Path, "refused", "destruction in progress")
+			continue
+		}
+		if wt.Leased {
+			report(wt.Path, "refused", "durably leased")
+			continue
+		}
+		if ownerAlive(wt) {
+			report(wt.Path, "refused", "live owner reservation")
 			continue
 		}
 		flavor := vcs.WorktreeBackendName(wt.Path)
 		if flavor == "" {
+			report(wt.Path, "refused", "unreadable worktree marker")
 			continue
 		}
 		if flavor != wantFlavor {
 			otherFlavor++
+			report(wt.Path, "refused", "different backend")
 			continue
 		}
 		if identityErr != nil {
 			unverifiedClone++
+			report(wt.Path, "refused", "requester identity unavailable")
 			continue
 		}
-		claim, err := claimCandidate(poolDir, wt, opts)
+		// Avoid reserving another clone's copy merely to reject it. Keep the
+		// existing identity proof inside the fence too: this is only a filter.
+		preclaimDir, err := acquisitionCommonGitDir(wt.Path)
 		if err != nil {
+			unverifiedClone++
+			if !deferForeign(candidateIndex) {
+				report(wt.Path, "refused", "clone identity unavailable")
+			}
+			continue
+		}
+		if !os.SameFile(preclaimDir, commonDir) {
+			otherClone++
+			// At the cap this copy is not finished: reclamation must still
+			// check it. Reporting now would hide its real completion later.
+			if !deferForeign(candidateIndex) {
+				report(wt.Path, "refused", "other clone")
+			}
+			continue
+		}
+		claim, err := claimCandidate(poolDir, wt)
+		if err != nil {
+			report(wt.Path, "refused", "reservation could not be saved")
 			return LeaseInfo{}, err
 		}
 		if claim == nil {
+			report(wt.Path, "refused", "reservation changed or acquisition in progress")
 			continue
 		}
 		var acquired LeaseInfo
+		reason := "checkout preparation failed"
 		candidateErr := func() error {
 			defer claim.close()
-			reject := func() error { return claim.save(State{Worktrees: []WorktreeEntry{wt}}) }
+			acquisitionStage("screening", wt.Path)
+			reject := func(why string) error {
+				reason = why
+				return claim.save(State{Worktrees: []WorktreeEntry{wt}})
+			}
 			candidateDir, err := acquisitionCommonGitDir(wt.Path)
 			if err != nil {
 				unverifiedClone++
-				return reject()
+				return reject("clone identity unavailable")
 			}
 			if !os.SameFile(candidateDir, commonDir) {
 				otherClone++
-				return reject()
+				return reject("other clone")
 			}
 			if scanErr != nil {
-				return reject()
+				return reject("process snapshot unavailable")
 			}
 			processes, err := selection.InWorktree(wt.Path)
-			if err != nil || len(processes) != 0 {
-				return reject()
+			if err != nil {
+				return reject("worktree process lookup failed")
+			}
+			if len(processes) != 0 {
+				return reject("live process")
 			}
 			dirty, err := vcs.IsDirty(wt.Path)
-			if err != nil || dirty {
-				return reject()
+			if err != nil {
+				return reject("checkout status unavailable")
+			}
+			if dirty {
+				return reject("dirty checkout")
 			}
 			safe, resetRef, head, err := checkReset(wt.Path, branch)
-			if err != nil || (!safe && !headMergedIntoRecordedBase(wt, branch, head, checkReset)) {
-				return reject()
+			if err != nil {
+				return reject("reset safety cannot be verified")
+			}
+			if !safe && !headMergedIntoRecordedBase(wt, branch, head, checkReset) {
+				return reject("unlanded work")
 			}
 			acquisitionStage("claimed", wt.Path)
 			// The shared snapshot is only selection evidence. Recheck the claimed
 			// slot after screening, while its slot fence excludes every writer.
 			processes, err = findProcessesInWorktree(wt.Path)
-			if err != nil || len(processes) != 0 {
-				return reject()
+			if err != nil {
+				return reject("final process check unavailable")
+			}
+			if len(processes) != 0 {
+				return reject("live process during final check")
 			}
 			acquisitionStage("validated", wt.Path)
 			err = prepareReused(repoRoot, branch, resetRef, head, claim, opts, &acquired)
 			if errors.Is(err, errCandidateRejected) {
-				return reject()
+				return reject("final validation refused reset")
 			}
 			return err
 		}()
+		if candidateErr == nil && acquired.Path != "" {
+			// Choosing an own-clone copy finishes the deferred candidates as
+			// skipped, without running an unnecessary foreign deletion walk.
+			for _, index := range foreignCandidates {
+				report(snapshot.Worktrees[index].Path, "skipped", "same-clone reuse selected before reclamation")
+			}
+			if candidateIndex != 0 {
+				report(wt.Path, "accepted", "clean reusable copy")
+			}
+		} else {
+			report(wt.Path, "refused", reason)
+		}
 		if candidateErr != nil {
 			return LeaseInfo{}, candidateErr
 		}
 		if acquired.Path != "" {
+			acquisitionStage("published", acquired.Path)
 			hooks.Run(postCreate, acquired.Path, opts.hookStdout, opts.hookStderr)
 			return acquired, nil
 		}
 	}
 	var reclaimDetails string
-	if len(snapshot.Worktrees) == poolSize && identityErr == nil && wantFlavor == "git" {
-		refusals, err := reclaimForeignWorktree(poolDir, snapshot, commonDir, opts, selection, scanErr)
+	if len(foreignCandidates) != 0 {
+		refusals, err := reclaimForeignWorktree(poolDir, snapshot, foreignCandidates, commonDir, opts, selection, scanErr, report)
 		if err != nil {
 			return LeaseInfo{}, err
 		}
@@ -652,6 +728,8 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	if err != nil {
 		return LeaseInfo{}, err
 	}
+	// Creation is not a candidate inspection. The command reports the
+	// completed allocation through its unchanged stdout contract.
 	hooks.Run(postCreate, acquired.Path, opts.hookStdout, opts.hookStderr)
 	return acquired, nil
 }

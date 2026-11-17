@@ -164,6 +164,88 @@ func TestAcquireForeignSelectionSnapshotOutsidePoolLock(t *testing.T) {
 	}
 }
 
+func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
+	for _, risk := range []string{"process", "snapshot-error"} {
+		t.Run(risk, func(t *testing.T) {
+			foreign, caller, pool := setupSharedClonePool(t)
+			path, err := Acquire(foreign, pool, 1, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Release(pool, path); err != nil {
+				t.Fatal(err)
+			}
+			var snapshot process.WorktreeSnapshot
+			var snapshotErr error
+			if risk == "process" {
+				tenant := exec.Command(os.Args[0], "-test.run=^TestAcquireTenantHelper$")
+				tenant.Env = append(os.Environ(), "TREEHOUSE_TENANT_HELPER=1")
+				tenant.Dir = path
+				out, err := tenant.StdoutPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				input, err := tenant.StdinPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := tenant.Start(); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { input.Close(); tenant.Process.Kill(); tenant.Wait() })
+				ready, err := bufio.NewReader(out).ReadString('\n')
+				if err != nil || ready != "TENANT_READY\n" {
+					t.Fatalf("selection tenant readiness: %q %v", ready, err)
+				}
+				snapshot, err = process.SnapshotWorktreeProcesses()
+				if err != nil {
+					t.Fatal(err)
+				}
+				matches, err := snapshot.InWorktree(path)
+				found := false
+				for _, proc := range matches {
+					found = found || proc.PID == int32(tenant.Process.Pid)
+				}
+				if err != nil || !found {
+					t.Fatalf("selection snapshot did not capture the fixture tenant: %#v %v", matches, err)
+				}
+				// Make the final scan empty in reality too. Refusal must come from
+				// the selection evidence, not from the final-scan fallback.
+				if err := tenant.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+				_ = tenant.Wait()
+			} else {
+				snapshotErr = fmt.Errorf("fixture process snapshot unavailable")
+			}
+			oldSnapshot, oldFinal := snapshotWorktreeProcesses, findProcessesInWorktree
+			selections, finals := 0, 0
+			snapshotWorktreeProcesses = func() (process.WorktreeSnapshot, error) {
+				selections++
+				return snapshot, snapshotErr
+			}
+			findProcessesInWorktree = func(string) ([]process.ProcessInfo, error) {
+				finals++
+				return nil, nil
+			}
+			t.Cleanup(func() { snapshotWorktreeProcesses = oldSnapshot; findProcessesInWorktree = oldFinal })
+			got, err := AcquireLeaseInfoWithOptions(caller, pool, 1, nil, "selection risk", AcquireOptions{SkipFetch: true})
+			if err == nil || got.Path != "" {
+				t.Fatalf("foreign selection risk was allocated: %#v %v", got, err)
+			}
+			if selections != 1 || finals != 0 {
+				t.Fatalf("foreign selection refusal fell through: snapshots=%d final scans=%d", selections, finals)
+			}
+			assertFileContents(t, filepath.Join(path, "README.md"), "hi\n")
+			state, err := ReadState(pool)
+			if err != nil || len(state.Worktrees) != 1 || state.Worktrees[0].Leased || state.Worktrees[0].OwnerPID != 0 {
+				t.Fatalf("foreign selection refusal changed membership/reservation: %#v %v", state, err)
+			}
+			t.Logf("foreign selection %s refused; snapshots=%d final scans=%d; original checkout retained", risk, selections, finals)
+		})
+	}
+}
+
 func TestAcquireFenceProtectsLastComparisonThroughReset(t *testing.T) {
 	for _, stage := range []string{"claimed", "reset"} {
 		t.Run(stage, func(t *testing.T) {
@@ -505,6 +587,95 @@ func TestAcquireCrashHelper(t *testing.T) {
 	}
 }
 
+func TestAcquireRefusedScreeningCrashReservations(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprintf("foreign=%t/lease=true", foreign), func(t *testing.T) {
+			repo, pool, paths := acquisitionFixture(t, 2)
+			caller := repo
+			if foreign {
+				caller = filepath.Join(t.TempDir(), "myrepo")
+				runGit(t, repo, "clone", filepath.Join(filepath.Dir(repo), "remote.git"), caller)
+			}
+			const contents = "recognizable refused checkout\n"
+			if err := os.WriteFile(filepath.Join(paths[0], "README.md"), []byte(contents), 0644); err != nil {
+				t.Fatal(err)
+			}
+			spare, err := LeaseExisting(pool, "2", "keep the spare reserved")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestAcquireCrashHelper$")
+			cmd.Env = append(os.Environ(), "TREEHOUSE_CRASH_HELPER=1", "TREEHOUSE_CRASH_STAGE=screening", "TREEHOUSE_CRASH_LEASE=1", "TREEHOUSE_CRASH_REPO="+caller, "TREEHOUSE_CRASH_POOL="+pool)
+			out, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			input, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { input.Close(); cmd.Process.Kill(); cmd.Wait() })
+			ready, err := bufio.NewReader(out).ReadString('\n')
+			if err != nil || ready != "HELD\n" {
+				t.Fatalf("screening readiness: %q %v", ready, err)
+			}
+			before, err := ReadState(pool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("before kill foreign=%t leased=%t holder=%q owner=%d", foreign, before.Worktrees[0].Leased, before.Worktrees[0].LeaseHolder, before.Worktrees[0].OwnerPID)
+			if err := cmd.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			_ = cmd.Wait()
+			if _, err := List(pool); err != nil {
+				t.Fatal(err)
+			}
+			after, err := ReadState(pool)
+			if err != nil || len(after.Worktrees) != 2 {
+				t.Fatalf("screening recovery membership: %#v %v", after, err)
+			}
+			refused := after.Worktrees[0]
+			if refused.Leased || refused.LeaseID != "" || refused.OwnerPID != 0 {
+				t.Fatalf("killed screening get stranded a reservation on a refused copy: %#v", refused)
+			}
+			assertFileContents(t, filepath.Join(paths[0], "README.md"), contents)
+			got, err := AcquireLeaseInfoWithOptions(caller, pool, 2, nil, "after refused crash", AcquireOptions{SkipFetch: true})
+			if err == nil || got.Path != "" {
+				t.Fatalf("dirty copy was allocated after screening crash: %#v %v", got, err)
+			}
+			assertFileContents(t, filepath.Join(paths[0], "README.md"), contents)
+			// No named return is needed: repairing the actual risk must make the
+			// same-clone copy reusable or the foreign one reclaimable again.
+			if err := os.WriteFile(filepath.Join(paths[0], "README.md"), []byte("hi\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			got, err = AcquireLeaseInfoWithOptions(caller, pool, 2, nil, "after repair", AcquireOptions{SkipFetch: true})
+			if err != nil || got.Path == "" || !foreign && got.Path != paths[0] {
+				t.Fatalf("screening crash permanently stranded capacity: %#v %v", got, err)
+			}
+			assertCloneCommonDir(t, got.Path, caller)
+			state, err := ReadState(pool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keptSpare := false
+			for _, entry := range state.Worktrees {
+				if entry.Name == "2" && entry.Leased && entry.LeaseID == spare.LeaseID {
+					keptSpare = true
+				}
+			}
+			if !keptSpare {
+				t.Fatal("screening recovery overwrote the independent spare lease")
+			}
+			t.Logf("foreign=%t: List cleared the dead screening owner, checkout preserved, unsafe allocation refused, legitimate completion resumed without return", foreign)
+		})
+	}
+}
+
 func TestAcquireFreshCrashReservations(t *testing.T) {
 	for _, stage := range []string{"fresh-claimed", "fresh-created"} {
 		for _, leased := range []bool{false, true} {
@@ -580,7 +751,7 @@ func TestAcquireFreshCrashReservations(t *testing.T) {
 }
 
 func TestAcquireCrashReservations(t *testing.T) {
-	for _, stage := range []string{"claimed", "verified", "seeding"} {
+	for _, stage := range []string{"claimed", "verified", "seeding", "published"} {
 		for _, leased := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/lease=%t", stage, leased), func(t *testing.T) {
 				repo, pool, paths := acquisitionFixture(t, 2)
@@ -612,7 +783,9 @@ func TestAcquireCrashReservations(t *testing.T) {
 					t.Fatal(err)
 				}
 				claim := state.Worktrees[0]
-				durable := leased || stage == "seeding"
+				// Requested leases become durable only after screening/reset;
+				// before that, either mode heals a dead screening owner.
+				durable := stage == "seeding" || stage == "published" && leased
 				t.Logf("persisted stage=%s requestedLease=%t leased=%t holder=%q leaseID=%q owner=%d", stage, leased, claim.Leased, claim.LeaseHolder, claim.LeaseID, claim.OwnerPID)
 				if durable {
 					if !claim.Leased || (stage != "seeding" && claim.LeaseID == "") || claim.OwnerPID != 0 {

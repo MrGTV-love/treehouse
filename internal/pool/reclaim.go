@@ -13,35 +13,40 @@ import (
 // reclaimForeignWorktree runs only at the cap, after own-clone reuse failed.
 // Each candidate has its own fence and reservation; no VCS or process work
 // holds the pool lock. The caller creates its own tree, never reuses a foreign one.
-func reclaimForeignWorktree(poolDir string, snapshot State, requester os.FileInfo, opts acquireOptions, selection process.WorktreeSnapshot, scanErr error) ([]string, error) {
+func reclaimForeignWorktree(poolDir string, snapshot State, candidates []int, requester os.FileInfo, opts acquireOptions, selection process.WorktreeSnapshot, scanErr error, report func(string, string, string)) ([]string, error) {
 	var refusals []string
-	for _, wt := range snapshot.Worktrees {
-		skip := func(reason string) {
+	for _, index := range candidates {
+		wt := snapshot.Worktrees[index]
+		reported := false
+		skip := func(reason, summary string) {
 			refusals = append(refusals, fmt.Sprintf("worktree %s: %s", wt.Name, reason))
+			report(wt.Path, "refused", summary)
+			reported = true
 		}
 		switch {
 		case wt.Destroying:
-			skip("destruction is in progress")
+			skip("destruction is in progress", "destruction in progress")
 			continue
 		case wt.Leased:
-			skip("durably leased")
+			skip("durably leased", "durably leased")
 			continue
 		case ownerAlive(wt):
-			skip("has a live owner reservation")
+			skip("has a live owner reservation", "live owner reservation")
 			continue
 		case !wt.SeedInventoryKnown:
-			skip("seed inventory cannot be verified")
+			skip("seed inventory cannot be verified", "seed inventory unavailable")
 			continue
 		case vcs.WorktreeBackendName(wt.Path) != "git":
-			skip("not a readable Git worktree")
+			skip("not a readable Git worktree", "unreadable Git worktree")
 			continue
 		}
-		claim, err := claimCandidate(poolDir, wt, opts)
+		claim, err := claimCandidate(poolDir, wt)
 		if err != nil {
+			report(wt.Path, "refused", "foreign reservation could not be saved")
 			return refusals, err
 		}
 		if claim == nil {
-			skip("reservation changed or acquisition in progress")
+			skip("reservation changed or acquisition in progress", "reservation changed or acquisition in progress")
 			continue
 		}
 		removed := false
@@ -54,13 +59,14 @@ func reclaimForeignWorktree(poolDir string, snapshot State, requester os.FileInf
 					}
 				}
 			}()
+			acquisitionStage("screening", wt.Path)
 			owner, err := acquisitionCommonGitDir(wt.Path)
 			if err != nil {
-				skip(fmt.Sprintf("clone identity cannot be verified: %v", err))
+				skip(fmt.Sprintf("clone identity cannot be verified: %v", err), "clone identity unavailable")
 				return nil
 			}
 			if os.SameFile(owner, requester) {
-				skip("belongs to the requesting clone")
+				skip("belongs to the requesting clone", "belongs to requesting clone")
 				return nil
 			}
 			processes, err := selection.InWorktree(wt.Path)
@@ -68,45 +74,45 @@ func reclaimForeignWorktree(poolDir string, snapshot State, requester os.FileInf
 				err = scanErr
 			}
 			if err != nil {
-				skip(fmt.Sprintf("process table cannot be read: %v", err))
+				skip(fmt.Sprintf("process table cannot be read: %v", err), "process snapshot unavailable")
 				return nil
 			}
 			if len(processes) != 0 {
-				skip("has live processes")
+				skip("has live processes", "live process")
 				return nil
 			}
 			untracked, reason := vcs.RecoveryWorktree(wt.Path)
 			if reason != "" {
-				skip(reason)
+				skip(reason, "foreign checkout failed safety checks")
 				return nil
 			}
 			if len(untracked) != 0 {
-				skip("has untracked paths: " + strings.Join(untracked, ", "))
+				skip("has untracked paths: "+strings.Join(untracked, ", "), "foreign copy has untracked paths")
 				return nil
 			}
 			ownerRoot, err := resolvePoolRepoRoot(wt)
 			if err != nil {
-				skip(fmt.Sprintf("owning repository cannot be resolved: %v", err))
+				skip(fmt.Sprintf("owning repository cannot be resolved: %v", err), "owning repository unavailable")
 				return nil
 			}
 			rootIdentity, err := acquisitionCommonGitDir(ownerRoot)
 			if err != nil {
-				skip(fmt.Sprintf("owning repository identity cannot be verified: %v", err))
+				skip(fmt.Sprintf("owning repository identity cannot be verified: %v", err), "owning repository identity unavailable")
 				return nil
 			}
 			if !os.SameFile(rootIdentity, owner) {
-				skip("owning repository identity does not match the slot")
+				skip("owning repository identity does not match the slot", "owning repository identity mismatch")
 				return nil
 			}
 			if !opts.skipFetch {
 				if err := vcs.Fetch(ownerRoot); err != nil {
-					skip(fmt.Sprintf("owning repository fetch failed: %v", err))
+					skip(fmt.Sprintf("owning repository fetch failed: %v", err), "owning repository fetch failed")
 					return nil
 				}
 			}
 			container, err := removableWorktreeContainer(poolDir, wt.Path)
 			if err != nil {
-				skip(err.Error())
+				skip(err.Error(), "foreign copy failed safe-removal checks")
 				return nil
 			}
 			acquisitionStage("foreign-validated", wt.Path)
@@ -127,7 +133,7 @@ func reclaimForeignWorktree(poolDir string, snapshot State, requester os.FileInf
 				return nil
 			})
 			if errors.Is(err, vcs.ErrWorktreeNotDisposable) {
-				skip(err.Error())
+				skip(err.Error(), "foreign copy failed safe-removal checks")
 				return nil
 			}
 			if err != nil {
@@ -150,9 +156,13 @@ func reclaimForeignWorktree(poolDir string, snapshot State, requester os.FileInf
 			return nil
 		}()
 		if err != nil {
+			if !reported {
+				report(wt.Path, "refused", "foreign reclamation failed")
+			}
 			return refusals, err
 		}
 		if removed {
+			report(wt.Path, "accepted", "reclaimed safe foreign copy")
 			return refusals, nil
 		}
 	}

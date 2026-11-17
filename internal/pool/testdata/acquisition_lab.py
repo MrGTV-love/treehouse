@@ -3,6 +3,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -15,11 +16,12 @@ PARSER = argparse.ArgumentParser()
 PARSER.add_argument('binary')
 PARSER.add_argument('--base', action='store_true')
 PARSER.add_argument('--evidence')
-PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure'], default='all')
+PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress'], default='all')
 ARGS = PARSER.parse_args()
 BINARY = str(Path(ARGS.binary).resolve())
 REAL_GIT = shutil.which('git')
 ROOT = Path(tempfile.mkdtemp(prefix='treehouse-acquisition-lab-')).resolve()
+SOCKET_ROOT = tempfile.TemporaryDirectory(prefix='th-sync-', dir='/tmp')
 REPORT = []
 
 
@@ -51,9 +53,11 @@ kind=os.environ.get('LAB_HOLD',''); target=os.environ.get('LAB_TARGET','')
 match=(kind=='selection' and cwd==target and 'status' in args or
        kind=='reset' and cwd==target and 'read-tree' in args or
        kind=='foreign-selection' and cwd==target and 'ls-files' in args and '-v' in args or
-       kind=='foreign-remove' and 'worktree' in args and 'remove' in args and target in args)
+       kind=='foreign-remove' and 'worktree' in args and 'remove' in args and target in args or
+       kind in ('progress','progress-foreign') and cwd in json.loads(os.environ['LAB_PROGRESS_PATHS']) and
+       ('status' in args if kind=='progress' else 'ls-files' in args and '-v' in args))
 if match:
- marker=os.path.join(root,'held-'+run)
+ marker=os.path.join(root,'held-'+run+('-'+os.path.basename(os.path.dirname(cwd)) if kind.startswith('progress') else ''))
  try:
   fd=os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY); os.close(fd)
  except FileExistsError: pass
@@ -115,7 +119,7 @@ class Fixture:
         (shim / 'git').write_text('#!'+sys.executable+'\n'+SHIM)
         (shim / 'git').chmod(0o755)
         # Unix socket paths have a small fixed limit, independent of pool layout.
-        self.socket_path = self.root / 'sync'
+        self.socket_path = Path(SOCKET_ROOT.name) / str(Fixture.serial)
         self.env.update(PATH=str(shim)+os.pathsep+self.env['PATH'], LAB_ROOT=str(self.root),
                         LAB_LOCK=str(self.pool / 'treehouse-state.lock'), LAB_LOG=str(self.log),
                         LAB_REAL_GIT=REAL_GIT, LAB_SOCKET=str(self.socket_path))
@@ -271,6 +275,160 @@ def failed_tree():
     record('TG3 failed immutable tree listing calls='+str(calls)+'; clean ancestor allocated; unlanded contents preserved; fixture='+str(f.root))
 
 
+def progress_rows(stderr):
+    rows = []
+    for line in stderr.splitlines():
+        if 'treehouse: checked ' not in line:
+            continue
+        match = re.fullmatch(r'treehouse: checked (.+): (accepted|refused|skipped): (.+)', line)
+        assert match, ('TG8 invalid progress shape', line)
+        path, decision, reason = match.groups()
+        assert os.path.isabs(path) and reason.strip(), ('TG8 missing copy or reason', line)
+        rows.append((path, decision, reason))
+    paths = [row[0] for row in rows]
+    assert len(paths) == len(set(paths)), ('TG8 repeated candidate identity', rows)
+    return rows
+
+
+def readable(stream):
+    # A gate at the next candidate proves all prior writes have happened. Read
+    # only bytes already available, so a buffering mutant fails without a wait.
+    result = bytearray()
+    os.set_blocking(stream.fileno(), False)
+    try:
+        while True:
+            try:
+                chunk = os.read(stream.fileno(), 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            result.extend(chunk)
+    finally:
+        os.set_blocking(stream.fileno(), True)
+    return result.decode()
+
+
+def incremental_progress(foreign=False):
+    f = Fixture(21, foreign=foreign, rejected=20)
+    phase = 'foreign' if foreign else 'same-clone'
+    secret = 'fixture-secret-must-not-appear-in-progress'
+    f.env['TREEHOUSE_PROGRESS_SECRET'] = secret
+    f.env['LAB_PROGRESS_PATHS'] = json.dumps(f.paths[1:])
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(f.socket_path)); server.listen()
+    proc = f.start('incremental', 'progress-foreign' if foreign else 'progress')
+    connection = None
+    stderr = ''
+    previous = None
+    try:
+        for k in range(1, 21):
+            connection, _ = server.accept()
+            assert connection.recv(1) == b'H'
+            assert proc.poll() is None, 'TG8 get exited before completion gate'
+            stderr += readable(proc.stderr)
+            assert readable(proc.stdout) == '', 'TG8 stdout changed before allocation'
+            rows = progress_rows(stderr)
+            expected = 0 if ARGS.base else k
+            assert len(rows) == expected, ('TG8 completed-candidate count while held', phase, k, rows)
+            if not ARGS.base:
+                assert [r[0] for r in rows] == f.paths[:k], ('TG8 wrong candidate identity', k, rows)
+                reason = 'safe-removal' if foreign else 'unlanded'
+                assert all(r[1] == 'refused' and reason in r[2] for r in rows), ('TG8 incorrect refusal reason', phase, rows)
+                snapshot = '\n'.join(stderr.splitlines()[-200:])
+                assert snapshot != previous, ('TG8 last-200-lines view did not change', k)
+                previous = snapshot
+            assert secret not in stderr and 'unlanded unique content ' not in stderr, 'TG8 sensitive value in progress'
+            if k in (1, 5, 20):
+                record('TG8 '+phase+' '+('BASE ' if ARGS.base else '')+'k='+str(k)+' readable='+str(len(rows))+' get still held; fixture='+str(f.root))
+            connection.sendall(b'R'); connection.close(); connection = None
+        out, remaining = proc.communicate()
+        stderr += remaining
+        expected_path = str(f.pool/'22'/'repo') if foreign else f.paths[-1]
+        assert proc.returncode == 0 and out == expected_path+'\n', ('TG8 stdout allocation contract', phase, proc.returncode, out, stderr)
+        rows = progress_rows(stderr)
+        if ARGS.base:
+            assert rows == [], rows
+        else:
+            assert len(rows) == 21 and rows[-1][0] == f.paths[-1] and rows[-1][1] == 'accepted', ('TG8 completed-candidate count or acceptance', phase, rows)
+            if foreign:
+                assert 'reclaimed' in rows[-1][2], ('TG8 foreign completion missing', rows)
+                assert git(Path(expected_path),'rev-parse','--path-format=absolute','--git-common-dir',output=True) == git(f.caller,'rev-parse','--path-format=absolute','--git-common-dir',output=True)
+            else:
+                assert 'reusable' in rows[-1][2], rows
+        record('TG8 '+phase+' completed: distinct candidate paths='+str(len(rows))+' stdout is allocation path only; fixture='+str(f.root))
+    finally:
+        if connection is not None:
+            connection.sendall(b'R'); connection.close()
+        server.close()
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate()
+
+    if foreign:
+        for i, path in enumerate(f.paths[:-1], 1):
+            assert (Path(path)/'README').read_text() == 'unlanded unique content '+str(i)+'\n'
+        return
+
+    for count in (1, 0):
+        quiet = Fixture(count)
+        if count == 0:
+            (quiet.caller/'treehouse.toml').write_text('max_trees = 1\n')
+        result = quiet.command('get', '--lease', '--no-fetch')
+        expected = str(quiet.pool/'1'/'repo')
+        assert result.returncode == 0 and result.stdout == expected+'\n', ('TG8 quiet allocation stdout', count, result.stdout, result.stderr)
+        assert progress_rows(result.stderr) == [], ('TG8 quiet allocation emitted progress', count, result.stderr)
+        record('TG8 '+('clean first copy' if count else 'fresh allocation')+': no progress; stdout unchanged; fixture='+str(quiet.root))
+
+    creation = Fixture(1, rejected=1)
+    (creation.caller/'treehouse.toml').write_text('max_trees = 2\n')
+    result = creation.command('get', '--lease', '--no-fetch')
+    assert result.returncode == 0 and result.stdout == str(creation.pool/'2'/'repo')+'\n', ('TG8 creation after refusal', result.stdout, result.stderr)
+    rows = progress_rows(result.stderr)
+    if ARGS.base:
+        assert rows == [], rows
+    else:
+        assert len(rows) == 1 and rows[0][0] == creation.paths[0] and rows[0][1] == 'refused' and 'unlanded' in rows[0][2], ('TG8 fresh construction was counted as an inspected candidate', rows)
+    assert (Path(creation.paths[0])/'README').read_text() == 'unlanded unique content 1\n'
+    record('TG8 one inspected refusal then fresh creation: no extra checked identity; stdout is new allocation; fixture='+str(creation.root))
+
+    mixed = Fixture(2, foreign=True)
+    git(mixed.repo, 'worktree', 'remove', mixed.paths[1])
+    git(mixed.caller, 'worktree', 'add', '--detach', mixed.paths[1], 'main')
+    (Path(mixed.paths[0])/'README').write_text('preserve deferred foreign work\n')
+    result = mixed.command('get', '--lease', '--no-fetch')
+    assert result.returncode == 0 and result.stdout == mixed.paths[1]+'\n', ('TG8 mixed-clone allocation', result.stdout, result.stderr)
+    rows = progress_rows(result.stderr)
+    if ARGS.base:
+        assert rows == [], rows
+    else:
+        assert [row[0] for row in rows] == mixed.paths and rows[0][1] == 'skipped' and rows[1][1] == 'accepted', ('TG8 deferred foreign skip lost or duplicated', rows)
+    assert (Path(mixed.paths[0])/'README').read_text() == 'preserve deferred foreign work\n'
+    record('TG8 own-clone reuse finishes deferred foreign path as skipped; foreign data preserved; fixture='+str(mixed.root))
+
+    # A newline in a copy alias must not inject a second protocol record. The
+    # real checkout is dirty and preserved; the next copy remains allocatable.
+    escaped = Fixture(2)
+    alias = escaped.root/'copy\nwith-newline'
+    alias.symlink_to(escaped.paths[0], target_is_directory=True)
+    state_path = escaped.pool/'treehouse-state.json'
+    state = json.loads(state_path.read_text())
+    state['worktrees'][0]['path'] = str(alias)
+    state_path.write_text(json.dumps(state))
+    (Path(escaped.paths[0])/'README').write_text('keep recognizable dirty data\n')
+    result = escaped.command('get', '--lease', '--no-fetch')
+    assert result.returncode == 0 and result.stdout == escaped.paths[1]+'\n', ('TG8 escaped-path allocation', result.stdout, result.stderr)
+    rows = progress_rows(result.stderr)
+    if ARGS.base:
+        assert rows == [], rows
+    else:
+        identity = str(alias).replace('\\', '\\\\').replace('\r', '\\r').replace('\n', '\\n')
+        assert len(rows) == 2 and rows[0][0] == identity and rows[0][1] == 'refused' and 'dirty' in rows[0][2], ('TG8 unescaped copy newline', rows)
+        assert rows[1][0] == escaped.paths[1] and rows[1][1] == 'accepted', rows
+    assert (Path(escaped.paths[0])/'README').read_text() == 'keep recognizable dirty data\n'
+    record('TG8 newline copy path escaped; dirty contents retained; fixture='+str(escaped.root))
+
+
 def safety():
     for risk in ['clean','ancestor','squash','leased','owner','process','tracked','untracked','ignored','unlanded','head-lock','foreign-clean','foreign-ignored']:
         f = Fixture(1 if risk.startswith('foreign') else 2, foreign=risk.startswith('foreign'))
@@ -312,6 +470,27 @@ def safety():
             if risk=='tracked': assert marker.read_text()=='recognizable dirty checkout\n'
             if risk=='foreign-clean':
                 assert git(Path(result.stdout.strip()),'rev-parse','--path-format=absolute','--git-common-dir',output=True)==git(f.caller,'rev-parse','--path-format=absolute','--git-common-dir',output=True)
+            rows = progress_rows(result.stderr)
+            if ARGS.base:
+                assert rows == [], ('TG8 baseline unexpectedly reports progress', risk, rows)
+            elif risk in ['clean','ancestor','squash','ignored']:
+                assert rows == [], ('TG8 clean first copy should stay quiet', risk, rows)
+            else:
+                expected_paths = [f.paths[0]] + ([expected] if expected and not risk.startswith('foreign') else [])
+                assert [row[0] for row in rows] == expected_paths, ('TG8 safety candidate count/identity', risk, rows)
+                if risk == 'foreign-clean':
+                    assert rows[0][1] == 'accepted' and 'reclaimed' in rows[0][2], ('TG8 foreign completion decision', rows)
+                else:
+                    assert rows[0][1] in ['refused','skipped'], ('TG8 incorrect initial decision', risk, rows)
+                    if risk == 'foreign-ignored':
+                        # Ignored paths are rejected by the backend's safe-removal
+                        # proof, not necessarily its ordinary untracked scan.
+                        assert any(category in rows[0][2] for category in ('ignored','untracked','safe-removal','disposable')), ('TG8 ignored-path reason is unrelated to removal safety', rows)
+                    else:
+                        reason = {'leased':'leased','owner':'owner','process':'process','tracked':'dirty','untracked':'dirty','unlanded':'unlanded','head-lock':'validation'}[risk]
+                        assert reason in rows[0][2], ('TG8 reason disagrees with fixture state', risk, rows)
+                if expected:
+                    assert rows[-1][1] == 'accepted' and rows[-1][2], ('TG8 missing acceptance', risk, rows)
             record('TG4 '+risk+' expected='+repr(expected)+' observed='+repr(result.stdout.strip())+' fixture='+str(f.root))
         finally:
             if tenant is not None:
@@ -335,7 +514,11 @@ try:
         exclusive('selection')
         exclusive('foreign-selection')
     if ARGS.only in ['all','safety']: safety()
+    if ARGS.only in ['all','progress']:
+        incremental_progress(foreign=True)
+        incremental_progress()
     if ARGS.only in ['all','cache-failure']: failed_tree()
 finally:
+    SOCKET_ROOT.cleanup()
     if ARGS.evidence:
         Path(ARGS.evidence).write_text('\n'.join(REPORT)+'\n')

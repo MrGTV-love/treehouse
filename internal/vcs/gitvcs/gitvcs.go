@@ -1759,17 +1759,26 @@ func NewResetChecker() func(string, string) (bool, string, string, error) {
 		entries map[string]string
 		err     error
 	}
+	type repositoryRead struct {
+		path string
+		err  error
+	}
 	trees := make(map[treeKey]treeRead)
+	repositories := make(map[string]repositoryRead)
 	reader := func(dir, ref string) (map[string]string, error) {
 		id, err := runGit(dir, "rev-parse", "--verify", ref+"^{tree}")
 		if err != nil {
 			return nil, err
 		}
-		common, err := CommonGitDir(dir)
-		if err != nil {
-			return nil, err
+		repository, ok := repositories[dir]
+		if !ok {
+			repository.path, repository.err = CommonGitDir(dir)
+			repositories[dir] = repository
 		}
-		key := treeKey{repository: common, object: id}
+		if repository.err != nil {
+			return nil, repository.err
+		}
+		key := treeKey{repository: repository.path, object: id}
 		if tree, ok := trees[key]; ok {
 			return tree.entries, tree.err
 		}

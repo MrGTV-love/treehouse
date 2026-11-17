@@ -3,10 +3,12 @@ package pool
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -48,6 +50,36 @@ type acquisitionClaim struct {
 }
 
 func (c *acquisitionClaim) close() { c.fence.Close() }
+
+// Callers omit a clean first reuse and empty-pool creation. Every other
+// completion is reported immediately, once per path. Fixed reasons never
+// include Git output or checkout contents.
+var candidateProgressPathEscaper = strings.NewReplacer("\\", "\\\\", "\r", "\\r", "\n", "\\n")
+
+func newCandidateProgress(writer io.Writer) func(string, string, string) {
+	if writer == nil {
+		writer = os.Stderr
+	}
+	var reported map[string]struct{}
+	return func(path, decision, reason string) {
+		if path == "" {
+			return
+		}
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return
+		}
+		if _, exists := reported[absolute]; exists {
+			return
+		}
+		if reported == nil {
+			reported = make(map[string]struct{})
+		}
+		reported[absolute] = struct{}{}
+		escaped := candidateProgressPathEscaper.Replace(absolute)
+		fmt.Fprintf(writer, "treehouse: checked %s: %s: %s\n", escaped, decision, reason)
+	}
+}
 
 // save merges just the fenced slot into freshly read state. Never publish a
 // stale pool snapshot over reservations acquired by another get.
@@ -156,7 +188,7 @@ func claimFresh(repoRoot, poolDir string, poolSize, firstSlot int, opts acquireO
 	return claim, err
 }
 
-func claimCandidate(poolDir string, observed WorktreeEntry, opts acquireOptions) (*acquisitionClaim, error) {
+func claimCandidate(poolDir string, observed WorktreeEntry) (*acquisitionClaim, error) {
 	var claim *acquisitionClaim
 	err := WithStateLock(poolDir, func() error {
 		state, err := ReadState(poolDir)
@@ -174,7 +206,9 @@ func claimCandidate(poolDir string, observed WorktreeEntry, opts acquireOptions)
 			if err != nil {
 				return nil
 			}
-			if err := markAcquired(&state.Worktrees[i], opts); err != nil {
+			// Screening has not selected this copy yet. Even --lease must heal
+			// like an interrupted ordinary get if it dies before reset.
+			if err := reserveOwner(&state.Worktrees[i]); err != nil {
 				fence.Close()
 				return err
 			}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/treehouse/v3/internal/pool"
+	"github.com/kunchenguid/treehouse/v3/internal/ui"
 )
 
 // ignoredFixture is a scratch pool with a manifest-seeded repository. Every
@@ -178,9 +179,12 @@ func TestPruneIgnoredSourceParentDirectoryLink(t *testing.T) {
 					}
 					return
 				}
-				const reason = "seed source is inside slot or pool"
-				if !strings.Contains(dry, reason) || !strings.Contains(out, reason) {
-					t.Errorf("missing boundary refusal %q: dry=%s execute=%s", reason, dry, out)
+				// Outcome, not prose: the slot is reported skipped for its ignored
+				// path, nothing is pruned, and the payload check below proves no loss.
+				for label, text := range map[string]string{"dry run": dry, "execute": out} {
+					if !strings.Contains(text, pool.PruneSkipIgnoredFiles) || !strings.Contains(text, "x.ignored") || strings.Contains(text, "Pruned 1 stale worktree") {
+						t.Errorf("%s did not report a truthful skip for the ignored path: %s", label, text)
+					}
 				}
 				if after := pruneFileInventory(t, slot); !reflect.DeepEqual(before, after) {
 					t.Errorf("prune lost or changed payload: before=%v after=%v", before, after)
@@ -235,8 +239,8 @@ func TestPruneIgnoredSlotEntryIsSymbolicLink(t *testing.T) {
 			before := pruneFileInventory(t, slot)
 			dry := f.run(nil, "prune")
 			out := f.run(nil, "prune", "--yes")
-			if !strings.Contains(dry, "seed is not a regular file") || !strings.Contains(out, "seed is not a regular file") {
-				t.Errorf("missing symbolic-entry refusal: dry=%s execute=%s", dry, out)
+			if !strings.Contains(dry, pool.PruneSkipIgnoredFiles) || !strings.Contains(out, pool.PruneSkipIgnoredFiles) || strings.Contains(out, "Pruned 1 stale worktree") {
+				t.Errorf("missing truthful skip for the symbolic entry: dry=%s execute=%s", dry, out)
 			}
 			if after := pruneFileInventory(t, slot); !reflect.DeepEqual(before, after) {
 				t.Errorf("prune lost or changed payload: before=%v after=%v", before, after)
@@ -274,11 +278,22 @@ func TestPruneIgnoredCrossLinkedSources(t *testing.T) {
 	}
 	crossLink(f.repo, filepath.Join(slot, "b.ignored"), filepath.Join(slot, "a.ignored"))
 
-	// Reference: the same manifest and links in a copy with no first slot.
+	// Reference: the same manifest and the IDENTICAL link text, with the first
+	// slot absent. The slot is moved aside while a second scratch pool runs the
+	// real get, so the links dangle exactly as in a copy without the first slot.
 	ref := newIgnoredFixture(t, map[string]string{"a.ignored": "same\n", "b.ignored": "same\n"}, "a.ignored\nb.ignored\n")
-	missing := filepath.Join(ref.home, "no-such-slot")
-	crossLink(ref.repo, filepath.Join(missing, "b.ignored"), filepath.Join(missing, "a.ignored"))
+	crossLink(ref.repo, filepath.Join(slot, "b.ignored"), filepath.Join(slot, "a.ignored"))
+	away := slot + ".away"
+	if err := os.Rename(slot, away); err != nil {
+		t.Fatal(err)
+	}
 	refSlot, _ := ref.lease()
+	if err := os.Rename(away, slot); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.Readlink(filepath.Join(ref.repo, "a.ignored")); got != filepath.Join(slot, "b.ignored") {
+		t.Fatalf("reference source link text differs from the fixture's: %q", got)
+	}
 	type entry struct {
 		kind    os.FileMode
 		content string
@@ -399,4 +414,104 @@ func TestPruneIgnoredModifiedBesideControl(t *testing.T) {
 func readFileOrEmpty(path string) string {
 	data, _ := os.ReadFile(path)
 	return string(data)
+}
+
+// N3 control: a source that is a symbolic link with an ABSOLUTE target outside
+// the pool. Seeding writes the link-target text as a regular file; an unchanged
+// slot file equal to that text is regenerable and must be pruned. A repair that
+// refuses every absolute source link would leave the slot behind and fail here.
+func TestPruneIgnoredEqualAbsoluteSourceLink(t *testing.T) {
+	f := newIgnoredFixture(t, map[string]string{"seed.ignored": "original\n"}, "seed.ignored\n")
+	external := filepath.Join(f.home, "external-target.txt")
+	if err := os.WriteFile(external, []byte("referent bytes\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(f.repo, "seed.ignored")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(f.repo, "seed.ignored")); err != nil {
+		t.Fatal(err)
+	}
+	slot, poolDir := f.lease()
+	idleAll(t, poolDir)
+	got, err := os.ReadFile(filepath.Join(slot, "seed.ignored"))
+	if err != nil || string(got) != external {
+		t.Fatalf("seeding did not write the absolute link-target text: %q (%v)", got, err)
+	}
+	f.run(nil, "prune")
+	out := f.run(nil, "prune", "--yes")
+	if _, err := os.Lstat(slot); !os.IsNotExist(err) || !strings.Contains(out, "Pruned 1 stale worktree") || registrations(t, poolDir) != 0 {
+		t.Errorf("equal absolute link text was not treated as regenerable: %s (%v)", out, err)
+	}
+}
+
+// N1 / X5: `prune --all` must name EVERY pool it discovered, including a pool
+// holding only a leased slot (nothing to prune, nothing skipped) beside a pool
+// with a protected ignored file, in both the dry run and the --yes output.
+func TestPruneAllNamesEveryDiscoveredPool(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, "scratch-pools")
+	env := []string{"TREEHOUSE_ROOT=" + root, "TREEHOUSE_VCS=git"}
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		out, stderr, code := runTreehouse(t, dir, home, env, append([]string{"--root", root}, args...)...)
+		t.Logf("treehouse %v: exit=%d\n%s%s", args, code, out, stderr)
+		if code != 0 {
+			t.Fatalf("command failed: %s", stderr)
+		}
+		return out
+	}
+	leasedRepo := setupTestRepoWithHome(t, home, "leased-repo")
+	ignoredRepo := setupTestRepoWithHome(t, home, "ignored-repo")
+	if err := os.WriteFile(filepath.Join(ignoredRepo, ".gitignore"), []byte("*.ignored\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, ignoredRepo, "add", ".")
+	gitCmd(t, ignoredRepo, "commit", "-m", "ignore")
+	gitCmd(t, ignoredRepo, "push", "origin", "main")
+
+	leasedSlot := strings.TrimSpace(run(leasedRepo, "get", "--lease"))
+	ignoredSlot := strings.TrimSpace(run(ignoredRepo, "get", "--lease"))
+	leasedPool, ignoredPool := filepath.Dir(filepath.Dir(leasedSlot)), filepath.Dir(filepath.Dir(ignoredSlot))
+	if leasedPool == ignoredPool {
+		t.Fatal("fixture needs two pools")
+	}
+	// Idle only the ignored pool's slot; the other pool keeps its durable lease.
+	state, err := pool.ReadState(ignoredPool)
+	if err != nil || len(state.Worktrees) != 1 {
+		t.Fatalf("ignored pool state: %#v (%v)", state, err)
+	}
+	entry := &state.Worktrees[0]
+	entry.Leased, entry.Destroying = false, false
+	entry.LeaseID, entry.LeaseHolder = "", ""
+	entry.LeasedAt = time.Time{}
+	entry.OwnerPID, entry.OwnerStartedAt = 0, 0
+	if err := pool.WriteState(ignoredPool, state); err != nil {
+		t.Fatal(err)
+	}
+	unique := filepath.Join(ignoredSlot, "unique.ignored")
+	if err := os.WriteFile(unique, []byte("unique payload\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	before := pruneFileInventory(t, ignoredSlot)
+	for _, args := range [][]string{{"prune", "--all"}, {"prune", "--all", "--yes"}} {
+		out := run(ignoredRepo, args...)
+		for _, p := range []string{leasedPool, ignoredPool} {
+			if !strings.Contains(out, ui.PrettyPath(p)) {
+				t.Errorf("%v does not name pool %s:\n%s", args, p, out)
+			}
+		}
+		if !strings.Contains(out, "across 2 pools") {
+			t.Errorf("%v does not report 2 pools: %s", args, out)
+		}
+	}
+	if after := pruneFileInventory(t, ignoredSlot); !reflect.DeepEqual(before, after) {
+		t.Errorf("protected file changed: before=%v after=%v", before, after)
+	}
+	if registrations(t, leasedPool) != 1 || registrations(t, ignoredPool) != 1 {
+		t.Errorf("a registration was lost")
+	}
 }

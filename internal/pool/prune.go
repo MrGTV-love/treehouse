@@ -536,7 +536,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 			}
 
 			if worktree.Orphaned {
-				if err := removeWorktreeDirectory(poolDir, worktree.Path); err != nil {
+				if err := pruneRemoveWorktreeDirectory(poolDir, worktree.Path); err != nil {
 					clearReservation(&state.Worktrees[idx])
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "could not remove worktree directory", err.Error()))
 					continue
@@ -550,7 +550,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipRemoveFailed, "VCS refused to remove worktree", err.Error()))
 					continue
 				}
-				if err := removeWorktreeDirectory(poolDir, worktree.Path); err != nil {
+				if err := pruneRemoveWorktreeDirectory(poolDir, worktree.Path); err != nil {
 					clearReservation(&state.Worktrees[idx])
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "could not remove worktree directory", err.Error()))
 					continue
@@ -875,6 +875,11 @@ func linkedWorktreeGitDir(worktreePath string) (string, bool, string) {
 	}
 	return filepath.Clean(gitDir), true, ""
 }
+
+// pruneRemoveWorktreeDirectory is the prune path's call to removeWorktreeDirectory.
+// It is a variable only so tests can install an observer that records the call and
+// then delegates to the real function; nothing else reassigns it.
+var pruneRemoveWorktreeDirectory = removeWorktreeDirectory
 
 // removeWorktreeDirectory removes only the target's contents. A pool-owned
 // parent is optional cleanup: os.Remove succeeds only when it is empty, so

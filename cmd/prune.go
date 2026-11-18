@@ -160,6 +160,7 @@ func printPruneAllResult(w io.Writer, result pool.PruneAllResult, dryRun bool, p
 	if dryRun {
 		if len(result.Result.Candidates) == 0 {
 			fmt.Fprintf(w, "🌳 No stale worktrees to prune across %d %s.\n", poolCount, plural("pool", poolCount))
+			printPrunePools(w, result.Pools, true)
 			printPruneSkipped(w, result.Result.Skipped, verbose)
 			printPruneOrphanHint(w, result.Result.Skipped, true, pruneOrphans, false)
 			return
@@ -173,6 +174,7 @@ func printPruneAllResult(w io.Writer, result pool.PruneAllResult, dryRun bool, p
 			plural("pool", poolCount),
 			formatBytes(result.Result.ReclaimableBytes),
 		)
+		printPrunePools(w, result.Pools, true)
 		printPruneWorktrees(w, result.Result.Candidates)
 		printPruneSkipped(w, result.Result.Skipped, verbose)
 		fmt.Fprintf(w, "🌳 Re-run with %s to delete these worktrees.\n", pruneDeleteFlags(true, pruneOrphans))
@@ -182,6 +184,7 @@ func printPruneAllResult(w io.Writer, result pool.PruneAllResult, dryRun bool, p
 
 	if len(result.Result.Pruned) == 0 {
 		fmt.Fprintf(w, "🌳 No stale worktrees pruned across %d %s.\n", poolCount, plural("pool", poolCount))
+		printPrunePools(w, result.Pools, false)
 		printPruneSkipped(w, result.Result.Skipped, verbose)
 		printPruneOrphanHint(w, result.Result.Skipped, true, pruneOrphans, true)
 		return
@@ -195,9 +198,29 @@ func printPruneAllResult(w io.Writer, result pool.PruneAllResult, dryRun bool, p
 		plural("pool", poolCount),
 		formatBytes(result.Result.FreedBytes),
 	)
+	printPrunePools(w, result.Pools, false)
 	printPruneWorktrees(w, result.Result.Pruned)
 	printPruneSkipped(w, result.Result.Skipped, verbose)
 	printPruneOrphanHint(w, result.Result.Skipped, true, pruneOrphans, true)
+}
+
+// printPrunePools names every pool a global prune discovered, including pools
+// with nothing to prune (for example one holding only leased slots), so a pool
+// can never be silently absent from the report. It changes no eligibility.
+func printPrunePools(w io.Writer, pools []pool.PrunePoolResult, dryRun bool) {
+	if len(pools) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "🌳 Inspected %d %s:\n", len(pools), plural("pool", len(pools)))
+	for _, p := range pools {
+		acted := len(p.Result.Pruned)
+		verb := "pruned"
+		if dryRun {
+			acted = len(p.Result.Candidates)
+			verb = "would prune"
+		}
+		fmt.Fprintf(w, "  %s  %s %d, skipped %d\n", ui.PrettyPath(p.PoolDir), verb, acted, len(p.Result.Skipped))
+	}
 }
 
 func printPruneWorktrees(w io.Writer, worktrees []pool.PruneWorktree) {

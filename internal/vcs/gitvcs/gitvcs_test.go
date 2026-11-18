@@ -401,7 +401,7 @@ func TestRemoveLandedWorktreeHoldsReftableHeadThroughRemoval(t *testing.T) {
 
 	if runtime.GOOS == "windows" {
 		called := false
-		err := RemoveLandedWorktree(repoDir, wtPath, nil, func() error {
+		err := RemoveLandedWorktree(repoDir, base, wtPath, nil, func() error {
 			called = true
 			return nil
 		})
@@ -418,7 +418,7 @@ func TestRemoveLandedWorktreeHoldsReftableHeadThroughRemoval(t *testing.T) {
 	}
 
 	var concurrentErr error
-	err = RemoveLandedWorktree(repoDir, wtPath, nil, func() error {
+	err = RemoveLandedWorktree(repoDir, base, wtPath, nil, func() error {
 		_, concurrentErr = runGit(wtPath, "commit", "--allow-empty", "-m", "unlanded")
 		return nil
 	})

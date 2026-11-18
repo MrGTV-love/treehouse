@@ -15,7 +15,8 @@ import (
 // DestroyClass is the safety classification of a worktree considered for
 // destruction. It mirrors the notions prune uses (see analyzeIdleWorktree and
 // analyzePruneCandidate in prune.go): a worktree is disposable only when it is
-// unleased, idle, clean, and merged into the default branch.
+// unleased, idle, clean, and merged into the default branch. Unlike prune, it
+// does not apply the ignored-file removal judgment (vcs.RequireCleanRemovalAllowed).
 type DestroyClass string
 
 const (

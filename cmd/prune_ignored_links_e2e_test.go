@@ -108,9 +108,14 @@ func registrations(t *testing.T, poolDir string) int {
 func makeDirLink(t *testing.T, target, link string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
+		// cmd.exe splits mklink arguments on '=', ',' and ';', which subtest
+		// temp paths contain; PowerShell reads both paths from the environment.
+		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"New-Item -ItemType Junction -Path $env:TREEHOUSE_LINK -Value $env:TREEHOUSE_TARGET | Out-Null")
+		cmd.Env = append(os.Environ(), "TREEHOUSE_LINK="+link, "TREEHOUSE_TARGET="+target)
+		out, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("mklink /J %s %s: %v\n%s", link, target, err, out)
+			t.Fatalf("junction %s -> %s: %v\n%s", link, target, err, out)
 		}
 		return
 	}

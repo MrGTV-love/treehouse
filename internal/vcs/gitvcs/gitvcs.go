@@ -16,8 +16,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 )
 
 // FindMainRepoRoot returns the main repository root for the current working
@@ -786,11 +784,11 @@ func requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir string, 
 			return &IgnoredPathRefusal{Reason: "cannot verify seeded ignored path", Detail: ignoredPaths[0], Cause: err}
 		}
 		defer destination.Close()
-		slotBoundary, err := pathidentity.Existing(worktreePath)
+		slotBoundary, err := physicalPath(worktreePath)
 		if err != nil {
 			return &IgnoredPathRefusal{Reason: "cannot verify seeded source boundary", Cause: err}
 		}
-		poolBoundary, err := pathidentity.Existing(poolDir)
+		poolBoundary, err := physicalPath(poolDir)
 		if err != nil {
 			return &IgnoredPathRefusal{Reason: "cannot verify seeded source boundary", Cause: err}
 		}
@@ -879,13 +877,13 @@ func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBounda
 	if !filepath.IsLocal(name) {
 		return false, fmt.Errorf("seed path is not local: %s", name)
 	}
-	parentPath, err := pathidentity.Existing(filepath.Dir(filepath.Join(source.Name(), name)))
+	parentPath, err := physicalPath(filepath.Dir(filepath.Join(source.Name(), name)))
 	if err != nil {
 		return false, err
 	}
 	for _, boundary := range []string{slotBoundary, poolBoundary} {
 		if !strings.EqualFold(filepath.VolumeName(boundary), filepath.VolumeName(parentPath)) {
-			continue // Canonical absolute paths on distinct volumes cannot overlap.
+			continue // Physical paths on distinct volumes cannot overlap.
 		}
 		rel, err := filepath.Rel(boundary, parentPath)
 		if err != nil {

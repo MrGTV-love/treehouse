@@ -532,8 +532,16 @@ func TestStateIdentityWatcherSeesTransientRewrite(t *testing.T) {
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(tmp, state); err != nil {
-		t.Fatal(err)
+	// On Windows the watcher's stat briefly holds a handle on the state file, and
+	// a rename over it then fails with "Access is denied"; retry for a bounded time.
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(time.Millisecond) {
+		err := os.Rename(tmp, state)
+		if err == nil {
+			break
+		}
+		if runtime.GOOS != "windows" || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
 	}
 	time.Sleep(50 * time.Millisecond)
 	if distinct, samples := stop(); distinct < 2 {

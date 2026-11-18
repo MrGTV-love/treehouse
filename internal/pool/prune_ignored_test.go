@@ -107,7 +107,7 @@ func TestPruneFinalCheckPreservesIgnoredFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(result.Candidates) != 1 || len(result.Pruned) != 0 || len(result.Skipped) != 1 || !strings.Contains(result.Skipped[0].Reason, filepath.Base(file)) {
+			if len(result.Candidates) != 1 || len(result.Pruned) != 0 || len(result.Skipped) != 1 || result.Skipped[0].Category != PruneSkipIgnoredFiles || !strings.Contains(result.Skipped[0].Detail, filepath.Base(file)) {
 				t.Errorf("final check did not refuse late payload: %+v", result)
 			}
 			data, err := os.ReadFile(file)

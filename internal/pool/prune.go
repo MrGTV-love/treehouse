@@ -81,7 +81,10 @@ const (
 	// PruneSkipOrphanedBackingRepo means the linked worktree's gitdir is gone.
 	PruneSkipOrphanedBackingRepo = "orphaned (backing repository missing)"
 	// PruneSkipOriginUnreachable means origin could not be reached for verification.
-	PruneSkipOriginUnreachable     = "origin unreachable (cannot verify)"
+	PruneSkipOriginUnreachable = "origin unreachable (cannot verify)"
+	// PruneSkipIgnoredFiles groups slots holding an ignored path that is not
+	// provably regenerable; each skip's Detail names the path.
+	PruneSkipIgnoredFiles          = "unsafe ignored files"
 	pruneSkipCannotVerify          = "cannot verify worktree"
 	pruneSkipCannotCheckProcesses  = "cannot check processes"
 	pruneSkipCannotMeasureSize     = "cannot measure size"
@@ -733,6 +736,18 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 		seededPaths = nil
 	}
 	if err := vcs.RequireCleanRemovalAllowed(context.RepoRoot, poolDir, worktree.Path, seededPaths); err != nil {
+		var ignored *vcs.IgnoredPathRefusal
+		if errors.As(err, &ignored) {
+			detail := ignored.Detail
+			if ignored.Cause != nil {
+				if detail != "" {
+					detail += ": "
+				}
+				detail += ignored.Cause.Error()
+			}
+			skipped = newPruneSkipped(wt.Name, wt.Path, PruneSkipIgnoredFiles, ignored.Reason, detail)
+			return worktree, skipped, true, context, nil
+		}
 		skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotVerify, err.Error(), "")
 		return worktree, skipped, true, context, nil
 	}

@@ -719,6 +719,28 @@ func requireNoWorktreeOperation(gitDir string) error {
 	return nil
 }
 
+// IgnoredPathRefusal is the removal judgment's refusal for an ignored path that
+// is not provably regenerable. Error() keeps the full historical text; Reason
+// is the stable category-level wording and Detail names the path (and any cause).
+type IgnoredPathRefusal struct {
+	Reason string
+	Detail string
+	Cause  error
+}
+
+func (e *IgnoredPathRefusal) Error() string {
+	text := e.Reason
+	if e.Detail != "" {
+		text += " (" + e.Detail + ")"
+	}
+	if e.Cause != nil {
+		text += ": " + e.Cause.Error()
+	}
+	return text
+}
+
+func (e *IgnoredPathRefusal) Unwrap() error { return e.Cause }
+
 // RequireCleanRemovalAllowed exposes the same removal judgment used by foreign
 // reclamation. Callers must recheck immediately before non-forced removal.
 func RequireCleanRemovalAllowed(repoRoot, poolDir, worktreePath string, seededPaths []string) error {
@@ -739,7 +761,7 @@ func requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir string, 
 	}
 	ignored, err := runGitRaw(worktreePath, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
 	if err != nil {
-		return fmt.Errorf("cannot verify worktree ignored paths: %w", err)
+		return &IgnoredPathRefusal{Reason: "cannot verify worktree ignored paths", Cause: err}
 	}
 	known := make(map[string]struct{}, len(seededPaths))
 	for _, name := range seededPaths {
@@ -748,7 +770,7 @@ func requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir string, 
 	ignoredPaths := recoveryNUL(ignored)
 	for _, name := range ignoredPaths {
 		if _, ok := known[name]; !ok {
-			return fmt.Errorf("worktree has an unseeded ignored path (%s)", name)
+			return &IgnoredPathRefusal{Reason: "worktree has an unseeded ignored path", Detail: name}
 		}
 	}
 	if len(ignoredPaths) != 0 {
@@ -756,30 +778,30 @@ func requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir string, 
 		// still disposable. The current owner checkout must retain equal bytes.
 		source, err := os.OpenRoot(repoRoot)
 		if err != nil {
-			return fmt.Errorf("cannot verify seeded ignored path (%s): %w", ignoredPaths[0], err)
+			return &IgnoredPathRefusal{Reason: "cannot verify seeded ignored path", Detail: ignoredPaths[0], Cause: err}
 		}
 		defer source.Close()
 		destination, err := os.OpenRoot(worktreePath)
 		if err != nil {
-			return fmt.Errorf("cannot verify seeded ignored path (%s): %w", ignoredPaths[0], err)
+			return &IgnoredPathRefusal{Reason: "cannot verify seeded ignored path", Detail: ignoredPaths[0], Cause: err}
 		}
 		defer destination.Close()
 		slotBoundary, err := pathidentity.Existing(worktreePath)
 		if err != nil {
-			return fmt.Errorf("cannot verify seeded source boundary: %w", err)
+			return &IgnoredPathRefusal{Reason: "cannot verify seeded source boundary", Cause: err}
 		}
 		poolBoundary, err := pathidentity.Existing(poolDir)
 		if err != nil {
-			return fmt.Errorf("cannot verify seeded source boundary: %w", err)
+			return &IgnoredPathRefusal{Reason: "cannot verify seeded source boundary", Cause: err}
 		}
 		var sourceBuffer, destinationBuffer [32 * 1024]byte
 		for _, name := range ignoredPaths {
 			equal, err := equalSeedFiles(source, destination, filepath.FromSlash(name), slotBoundary, poolBoundary, sourceBuffer[:], destinationBuffer[:])
 			if err != nil {
-				return fmt.Errorf("cannot verify seeded ignored path (%s): %w", name, err)
+				return &IgnoredPathRefusal{Reason: "cannot verify seeded ignored path", Detail: name, Cause: err}
 			}
 			if !equal {
-				return fmt.Errorf("worktree has a modified seeded ignored path (%s)", name)
+				return &IgnoredPathRefusal{Reason: "worktree has a modified seeded ignored path", Detail: name}
 			}
 		}
 	}

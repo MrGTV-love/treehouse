@@ -37,6 +37,9 @@ must lie outside the slot and pool after resolving parent links and must not
 share the slot file's inode; mode alone is not compared.
 This is checked during planning and again
 before deletion; concurrent writes after the last check are not protected.
+Git slots with replacement refs, locked or modules metadata, or an initialized
+submodule are also skipped, as foreign-slot reclamation skips them; a slot refused
+for an ignored path is listed under "unsafe ignored files" with the path shown.
 The ignored-file judgment does not cover jj slots or opted-in missing-repository
 orphans.
 
@@ -237,7 +240,7 @@ func printPruneSkipped(w io.Writer, skipped []pool.PruneSkipped, verbose bool) {
 			} else {
 				fmt.Fprintf(w, "  %-4s  %s\n", wt.Name, ui.PrettyPath(wt.Path))
 			}
-			if verbose && wt.Detail != "" {
+			if wt.Detail != "" && (verbose || pruneSkipCategory(wt) == pool.PruneSkipIgnoredFiles) {
 				fmt.Fprintf(w, "        detail: %s\n", wt.Detail)
 			}
 		}

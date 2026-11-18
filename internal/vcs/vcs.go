@@ -435,6 +435,9 @@ func RequireCleanRemovalAllowed(repoRoot, poolDir, path string, seededPaths []st
 	return gitvcs.RequireCleanRemovalAllowed(repoRoot, poolDir, path, seededPaths)
 }
 
+// IgnoredPathRefusal reports an ignored path that is not provably regenerable.
+type IgnoredPathRefusal = gitvcs.IgnoredPathRefusal
+
 // ErrWorktreeNotDisposable is a safety refusal before automatic removal starts.
 var ErrWorktreeNotDisposable = gitvcs.ErrWorktreeNotDisposable
 

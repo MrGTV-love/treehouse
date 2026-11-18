@@ -127,6 +127,10 @@ func TestRecoveredHandoffPreservesLiveCopy(t *testing.T) {
 	gitCmd(t, "", "clone", repo, nested)
 	gitCmd(t, nested, "config", "user.name", "Test")
 	gitCmd(t, nested, "config", "user.email", "test@test.com")
+	// git commit spawns a detached "maintenance run --auto", which takes
+	// objects/maintenance.lock in this repo. On slow runners it lands after the
+	// before-inventory and shows up as a slot change the handoff never made.
+	gitCmd(t, nested, "config", "maintenance.auto", "false")
 	gitCmd(t, nested, "checkout", "-b", "live-task")
 	for file, content := range map[string]string{".gitignore": "ignored\n", "private": "unpushed\n"} {
 		if err := os.WriteFile(filepath.Join(nested, file), []byte(content), 0644); err != nil {

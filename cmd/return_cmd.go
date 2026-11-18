@@ -81,7 +81,10 @@ same 'treehouse get' session still hold it, so a slot leased, returned, or hande
 to another 'treehouse get' since the listing is left alone. --all takes no path
 or name, and cannot be combined with the --if-lease-* conditions, which target a
 single lease identity. A slot 'treehouse status' reports as recovered is never
-returned by --all; check it and return it by name.`,
+returned by --all; check it and return it by name. A slot that was recovered when
+this run began is left alone even when a recovered-lease handoff gives it an
+ordinary lease before the run lists the pool; a run that begins after the
+handoff has completed treats it as an ordinary lease.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed("if-lease-id") && returnIfLeaseID == "" {
 			return fmt.Errorf("--if-lease-id cannot be empty")
@@ -256,6 +259,28 @@ func returnHeldWorktrees() error {
 	if err != nil {
 		return err
 	}
+	return returnHeldWorktreesIn(poolDir)
+}
+
+// afterBulkReturnSnapshot lets a test run a handoff between the run's first
+// read of the pool and its listing, the order a real race produces when the
+// listing waits for the state lock that the handoff holds.
+var afterBulkReturnSnapshot func()
+
+// returnHeldWorktreesIn is returnHeldWorktrees for a resolved pool. The first
+// thing it does is read which entries are recovered, with no lock and no side
+// effect. A run begins at that read. An entry recovered then is never released
+// by this run, even if a handoff gave it an ordinary lease before the listing
+// below (which waits for the lock) saw it. A run that begins after a handoff has
+// completed sees an ordinary lease and treats it as one.
+func returnHeldWorktreesIn(poolDir string) error {
+	recoveredAtStart, err := pool.RecoveredEntryNames(poolDir)
+	if err != nil {
+		return err
+	}
+	if afterBulkReturnSnapshot != nil {
+		afterBulkReturnSnapshot()
+	}
 
 	worktrees, err := pool.List(poolDir)
 	// An unreadable requester identity still leaves a valid listing: its idle
@@ -272,6 +297,11 @@ func returnHeldWorktrees() error {
 	var targets []pool.WorktreeStatus
 	var notHeld, recovered int
 	for _, wt := range worktrees {
+		if recoveredAtStart[wt.Name] && !(wt.Status == pool.StatusLeased && wt.LeaseHolder == pool.RecoveredLeaseHolder) {
+			recovered++
+			fmt.Fprintf(os.Stderr, "🌳 Leaving %s at %s alone: it was recovered when this run began, so this run never releases it, even if it has been handed to a holder since. Return it by name if you mean to: treehouse return %s\n", wt.Name, ui.PrettyPath(wt.Path), quoteReturnPath(wt.Path))
+			continue
+		}
 		if wt.Status == pool.StatusLeased && wt.LeaseHolder == pool.RecoveredLeaseHolder {
 			recovered++
 			fmt.Fprintf(os.Stderr, "🌳 Leaving %s at %s leased: it was recovered, so nothing proves it idle and it is only returned by name. Check it, then run: treehouse return %s\n", wt.Name, ui.PrettyPath(wt.Path), quoteReturnPath(wt.Path))

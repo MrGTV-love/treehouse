@@ -11,16 +11,51 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/kunchenguid/treehouse/v3/internal/pool"
 )
 
 // Every subprocess is confined to an explicit scratch root, including observers
 // and racing lifecycle commands. Recovery is exercised through truncated JSON,
 // not by manufacturing a recovered entry.
 func handoffFixture(t *testing.T) (repo, home, root, path, state string) {
+	return handoffFixtureFor(t, "corrupt-state")
+}
+
+// recoveredOrigins lists every writer of RecoveredLeaseHolder in internal/pool
+// as a scratch fixture: the rebuild after a corrupt or truncated state file
+// (ReadState, recoverCorruptState), the two missing-entry recoveries
+// (recoverMissingStateEntries with no state file and with no entry for the
+// slot), a lost state key (ReadState quarantining entries whose inventory cannot
+// authenticate), and the shape of an entry an earlier version wrote: valid
+// current-version JSON with a recovery_reason and an authenticated inventory.
+var recoveredOrigins = []string{"corrupt-state", "missing-state-file", "missing-entry", "lost-state-key", "earlier-version-known-inventory"}
+
+func handoffEditState(t *testing.T, state string, edit func(s, wt map[string]any)) {
+	t.Helper()
+	data, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s map[string]any
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatal(err)
+	}
+	edit(s, s["worktrees"].([]any)[0].(map[string]any))
+	data, err = json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func handoffFixtureFor(t *testing.T, origin string) (repo, home, root, path, state string) {
 	t.Helper()
 	repo, home = setupTestRepo(t)
 	root = filepath.Join(home, "scratch-pools")
@@ -33,15 +68,44 @@ func handoffFixture(t *testing.T) (repo, home, root, path, state string) {
 		t.Fatal(err)
 	}
 	path = lease.Path
-	state = filepath.Join(filepath.Dir(filepath.Dir(path)), "treehouse-state.json")
-	if err := os.WriteFile(state, []byte("{"), 0644); err != nil {
-		t.Fatal(err)
+	poolDir := filepath.Dir(filepath.Dir(path))
+	state = filepath.Join(poolDir, "treehouse-state.json")
+	switch origin {
+	case "corrupt-state":
+		if err := os.WriteFile(state, []byte("{"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	case "missing-state-file":
+		if err := os.Remove(state); err != nil {
+			t.Fatal(err)
+		}
+	case "missing-entry":
+		handoffEditState(t, state, func(s, _ map[string]any) { s["worktrees"] = []any{} })
+	case "lost-state-key":
+		if err := os.Remove(filepath.Join(poolDir, "treehouse-state.key")); err != nil {
+			t.Fatal(err)
+		}
+	case "earlier-version-known-inventory":
+		handoffEditState(t, state, func(_, wt map[string]any) {
+			if wt["seed_inventory_known"] != true || wt["seed_inventory_digest"] == "" {
+				t.Fatalf("fixture lost its authenticated inventory: %v", wt)
+			}
+			wt["leased"] = true
+			wt["lease_holder"] = recoveredHolderLiteral
+			wt["recovery_reason"] = "an earlier version swept this slot"
+		})
+	default:
+		t.Fatalf("unknown origin %s", origin)
 	}
-	_, stderr, code = runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, "status", "--json")
-	if code != 0 || !strings.Contains(stderr, "corrupt") {
+	out, stderr, code = runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, "status", "--json")
+	var rows []statusJSONWorktree
+	if code != 0 || json.Unmarshal([]byte(out), &rows) != nil || len(rows) != 1 || rows[0].LeaseHolder != recoveredHolderLiteral || rows[0].Path != path {
+		t.Fatalf("%s did not produce a recovered slot: %d %s %s", origin, code, out, stderr)
+	}
+	if origin == "corrupt-state" && !strings.Contains(stderr, "corrupt") {
 		t.Fatalf("corruption recovery failed: %d %s", code, stderr)
 	}
-	t.Logf("scratch root=%s slot=%s", root, path)
+	t.Logf("origin=%s scratch root=%s slot=%s", origin, root, path)
 	return
 }
 
@@ -344,6 +408,9 @@ func TestRecoveredHandoffRefusals(t *testing.T) {
 				}
 			}
 			before := handoffInventory(t, filepath.Dir(path))
+			// A refusal that unleases the slot and writes the old bytes back keeps the
+			// bytes but replaces the file, which its change time and mtime show.
+			stateBefore := handoffInventory(t, filepath.Dir(state))[filepath.Base(state)]
 			_, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root, "TREEHOUSE_LEASE_HOLDER=environment-task"}, args...)
 			if code == 0 || !strings.Contains(stderr, reason) {
 				t.Fatalf("%s refusal: code=%d want=%q stderr=%s", kind, code, reason, stderr)
@@ -363,6 +430,9 @@ func TestRecoveredHandoffRefusals(t *testing.T) {
 			if after := handoffInventory(t, filepath.Dir(path)); !reflect.DeepEqual(before, after) {
 				t.Fatalf("refusal changed slot inventory:%s", handoffInventoryDiff(before, after))
 			}
+			if stateAfter := handoffInventory(t, filepath.Dir(state))[filepath.Base(state)]; !reflect.DeepEqual(stateBefore, stateAfter) {
+				t.Fatalf("refusal rewrote the state file (metadata %+v -> %+v)", stateBefore, stateAfter)
+			}
 		})
 	}
 }
@@ -381,7 +451,9 @@ func TestRecoveredHandoffObserver(t *testing.T) {
 		if _, err := os.Stat(state + ".observer-stop"); err == nil {
 			break
 		}
-		data, err := os.ReadFile(state)
+		// Shared read: on Windows an ordinary open handle (no FILE_SHARE_DELETE)
+		// would make the state commit fail with a sharing violation.
+		data, err := pool.ReadFileShared(state)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -414,14 +486,13 @@ func TestRecoveredHandoffObserver(t *testing.T) {
 	t.Logf("observer samples=%d", samples)
 }
 
-// On Windows an open read handle makes ReplaceFileW in the state commit path
-// fail with a sharing violation, so the tight-loop observer would fail the
-// racing commands for a test-only reason; the race still runs there unobserved.
-func startHandoffObserver(t *testing.T, state, path string) (stop func() string) {
+// The observer runs on every platform. It reads the state file through
+// pool.ReadFileShared, which opens with FILE_SHARE_DELETE on Windows, so it
+// never makes the state commit (ReplaceFileW) fail with a sharing violation.
+// stop reports what the observer saw; an error means it saw the target unleased
+// or missing, or made no observation.
+func startHandoffObserver(t *testing.T, state, path string) (stop func() (string, error)) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		return func() string { return "" }
-	}
 	observer := exec.Command(os.Args[0], "-test.run=^TestRecoveredHandoffObserver$", "-test.v")
 	observer.Env = append(os.Environ(), "TREEHOUSE_HANDOFF_OBSERVER="+state, "TREEHOUSE_HANDOFF_TARGET="+path)
 	pipe, err := observer.StdoutPipe()
@@ -451,15 +522,15 @@ func startHandoffObserver(t *testing.T, state, path string) (stop func() string)
 	var rest bytes.Buffer
 	drained := make(chan struct{})
 	go func() { _, _ = io.Copy(&rest, pipe); close(drained) }()
-	return func() string {
+	return func() (string, error) {
 		if err := os.WriteFile(state+".observer-stop", nil, 0644); err != nil {
 			t.Fatal(err)
 		}
 		<-drained
 		if err := observer.Wait(); err != nil {
-			t.Fatalf("observer failed: %v %s %s %s", err, prefix.String(), rest.String(), observerErr.String())
+			return "", fmt.Errorf("observer failed: %v %s %s %s", err, prefix.String(), rest.String(), observerErr.String())
 		}
-		return rest.String()
+		return rest.String(), nil
 	}
 }
 
@@ -484,7 +555,10 @@ func TestRecoveredHandoffConcurrentLifecycle(t *testing.T) {
 		}
 		_, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, handoffArgs(path, "real-task")...)
 		wg.Wait()
-		observed := stopObserver()
+		observed, observerErr := stopObserver()
+		if observerErr != nil {
+			t.Fatal(observerErr)
+		}
 		if code != 0 {
 			t.Fatalf("handoff: %d %s", code, stderr)
 		}
@@ -492,5 +566,37 @@ func TestRecoveredHandoffConcurrentLifecycle(t *testing.T) {
 			t.Fatalf("racing lifecycle removed target: %v", err)
 		}
 		t.Logf("iteration=%d %s", iteration, observed)
+	}
+}
+
+// Controlled negative for the observer on every platform: a release window (the
+// slot unleased for 250 ms under the state lock, then leased again) must be seen.
+// Without it the observer could be a no-op and TestRecoveredHandoffConcurrentLifecycle
+// would still pass.
+func TestRecoveredHandoffObserverSeesTransientUnlease(t *testing.T) {
+	_, _, _, path, state := handoffFixture(t)
+	poolDir := filepath.Dir(state)
+	stopObserver := startHandoffObserver(t, state, path)
+	setLeased := func(leased bool) {
+		st, err := pool.ReadState(poolDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Worktrees[0].Leased = leased
+		if err := pool.WriteState(poolDir, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pool.WithStateLock(poolDir, func() error {
+		setLeased(false)
+		time.Sleep(250 * time.Millisecond)
+		setLeased(true)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := stopObserver()
+	if err == nil || !strings.Contains(err.Error(), "observer saw unleased target") {
+		t.Fatalf("observer missed a 250 ms release window: %v", err)
 	}
 }

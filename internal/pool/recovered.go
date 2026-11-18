@@ -2,7 +2,9 @@ package pool
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,6 +104,52 @@ func HandoffRecoveredLease(poolDir, path, expectedHolder, holder string) (LeaseI
 		return nil
 	})
 	return lease, err
+}
+
+// StateFileEntryExists reports whether the pool state file has a directory entry,
+// without following it. A dangling symlink is an entry that cannot be read, so it
+// counts as present and the caller reports the read error; only an absent entry
+// means "not a pool". It has no side effect, unlike taking the state lock.
+func StateFileEntryExists(poolDir string) (bool, error) {
+	_, err := os.Lstat(stateFilePath(poolDir))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// RecoveredEntryNames is the snapshot a bulk return takes as its very first
+// read of the pool. It lists, by entry name, every entry that is recovered at
+// that instant, from one lock-free read of the state file that never recovers,
+// heals or writes anything. `return --all` never releases an entry named here,
+// even when a handoff gives it an ordinary lease before the run lists the pool:
+// the run began before that handoff completed. A read that fails for a reason
+// other than "no file" is an error, so the caller releases nothing. A file that
+// is missing, does not parse or has an older version yields no names because
+// the listing that follows recovers every slot as recovered and the run skips
+// each of them.
+func RecoveredEntryNames(poolDir string) (map[string]bool, error) {
+	data, err := ReadFileShared(stateFilePath(poolDir))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading recovered-entry snapshot: %w", err)
+	}
+	var state State
+	if json.Unmarshal(data, &state) != nil || state.Version != stateVersion {
+		return nil, nil
+	}
+	names := map[string]bool{}
+	for _, wt := range state.Worktrees {
+		if wt.Leased && wt.LeaseHolder == RecoveredLeaseHolder {
+			names[wt.Name] = true
+		}
+	}
+	return names, nil
 }
 
 // A recovered entry (see RecoveredLeaseHolder) is a persistent quarantine:

@@ -111,3 +111,45 @@ func TestRecoveredHandoffRejectsUntrustedInventoryWithoutBlessingSibling(t *test
 		t.Fatalf("refusal changed state: %v", err)
 	}
 }
+
+func TestRecoveredEntryNamesIsASideEffectFreeSnapshot(t *testing.T) {
+	repo, poolDir := setupLocalRepo(t)
+	idleSlots(t, repo, poolDir, 2)
+	quarantine(t, poolDir, "1")
+	names, err := RecoveredEntryNames(poolDir)
+	if err != nil || len(names) != 1 || !names["1"] {
+		t.Fatalf("snapshot = %v, %v; want only slot 1", names, err)
+	}
+	stateFile := stateFilePath(poolDir)
+	before, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(stateFile); !bytes.Equal(before, after) {
+		t.Fatal("snapshot changed the state file")
+	}
+	// A corrupt file yields no names and no error: the listing that follows
+	// recovers every slot as recovered.
+	if err := os.WriteFile(stateFile, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if names, err := RecoveredEntryNames(poolDir); err != nil || names != nil {
+		t.Fatalf("corrupt snapshot = %v, %v", names, err)
+	}
+	// An unreadable entry is an error, so the caller releases nothing.
+	if err := os.Remove(stateFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(stateFile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecoveredEntryNames(poolDir); err == nil {
+		t.Fatal("unreadable state produced no error")
+	}
+	if present, err := StateFileEntryExists(poolDir); err != nil || !present {
+		t.Fatalf("StateFileEntryExists = %v, %v", present, err)
+	}
+	if present, err := StateFileEntryExists(filepath.Join(poolDir, "nowhere")); err != nil || present {
+		t.Fatalf("StateFileEntryExists(absent) = %v, %v", present, err)
+	}
+}

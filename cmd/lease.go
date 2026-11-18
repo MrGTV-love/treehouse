@@ -61,7 +61,7 @@ for the lease identity and metadata. All banners go to stderr.`,
 }
 
 func init() {
-	leaseCmd.Flags().StringVar(&leaseHolderFlag, "lease-holder", "", "Optional label recorded as the lease holder (defaults to $TREEHOUSE_LEASE_HOLDER)")
+	leaseCmd.Flags().StringVar(&leaseHolderFlag, "lease-holder", "", "Label recorded as the lease holder (optional, defaults to $TREEHOUSE_LEASE_HOLDER; with --recover it is required, must be given explicitly, and the environment default is not used)")
 	leaseCmd.Flags().BoolVar(&leaseJSONFlag, "json", false, "Print the lease as JSON")
 	leaseCmd.Flags().StringVar(&leasePathFlag, "path", "", "Lease the worktree at this exact path instead of naming it; its pool is found from the path")
 	leaseCmd.Flags().BoolVar(&leaseRecoverFlag, "recover", false, "Hand a verified recovered lease to its real holder without releasing it (requires --path, --if-lease-holder and --lease-holder)")
@@ -129,19 +129,9 @@ func leaseRunE(cmd *cobra.Command, args []string) error {
 		// Resolve only the pool here. Membership and the holder comparison
 		// belong to HandoffRecoveredLease's locked, strict state read, not
 		// FindByPath/ReadState, which may recover a corrupt file as a side effect.
-		poolDir := filepath.Dir(filepath.Dir(path))
-		if !pool.IsPoolDir(poolDir) {
-			repoRoot, err := vcs.FindMainRepoRootFrom(path)
-			if err != nil {
-				return fmt.Errorf("worktree %s is not managed by treehouse", path)
-			}
-			poolDir, err = poolDirForRepoRoot(repoRoot)
-			if err != nil {
-				return err
-			}
-			if !pool.IsPoolDir(poolDir) {
-				return fmt.Errorf("worktree %s is not managed by treehouse", path)
-			}
+		poolDir, err := recoverHandoffPoolDir(path)
+		if err != nil {
+			return err
 		}
 		lease, err := pool.HandoffRecoveredLease(poolDir, path, leaseExpectedHolderFlag, leaseHolderFlag)
 		if err != nil {
@@ -189,6 +179,38 @@ func leaseRunE(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "🌳 Leased worktree %s at %s. Run 'treehouse return %s' to release it.\n",
 		name, ui.PrettyPath(lease.Path), ui.PrettyPath(lease.Path))
 	return printExistingLease(lease)
+}
+
+// recoverHandoffPoolDir finds the pool of an exact slot path for the recovered
+// handoff without side effects. A directory that has no state file entry is not a
+// pool, so it is refused as unmanaged before the state lock could create a
+// directory or lock file there. An entry that exists but cannot be read, such as
+// a dangling symlink, is not "unmanaged": it is reported with its read error.
+func recoverHandoffPoolDir(path string) (string, error) {
+	poolDir := filepath.Dir(filepath.Dir(path))
+	present, err := pool.StateFileEntryExists(poolDir)
+	if err != nil {
+		return "", fmt.Errorf("reading handoff state: %w", err)
+	}
+	if present {
+		return poolDir, nil
+	}
+	repoRoot, err := vcs.FindMainRepoRootFrom(path)
+	if err != nil {
+		return "", fmt.Errorf("worktree %s is not managed by treehouse", path)
+	}
+	poolDir, err = poolDirForRepoRoot(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	present, err = pool.StateFileEntryExists(poolDir)
+	if err != nil {
+		return "", fmt.Errorf("reading handoff state: %w", err)
+	}
+	if !present {
+		return "", fmt.Errorf("worktree %s is not managed by treehouse", path)
+	}
+	return poolDir, nil
 }
 
 func printExistingLease(lease pool.LeaseInfo) error {

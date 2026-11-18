@@ -159,9 +159,8 @@ func TestAcquireForeignSelectionSnapshotOutsidePoolLock(t *testing.T) {
 	ownSelections, foreignSelections, finals, locked := 0, 0, 0, 0
 	inForeignWalk := false
 	acquisitionStage = func(stage, path string) {
-		// Every candidate in this fixture belongs to the other clone, so no
-		// own-clone screening claim can reach this hook.
-		if stage == "screening" {
+		// The walk starts before its snapshot, not at its first candidate.
+		if stage == "foreign-snapshot" {
 			inForeignWalk = true
 		}
 		oldStage(stage, path)
@@ -200,10 +199,10 @@ func TestAcquireForeignSelectionSnapshotOutsidePoolLock(t *testing.T) {
 		t.Fatalf("foreign get: %#v %v", got, err)
 	}
 	assertCloneCommonDir(t, got.Path, caller)
-	if ownSelections > 1 || foreignSelections > 1 || ownSelections+foreignSelections == 0 || finals != 1 || locked != 0 {
+	if ownSelections != 1 || foreignSelections != 1 || finals != 1 || locked != 0 {
 		t.Fatalf("foreign walk snapshot bound: own=%d foreign=%d final=%d locked=%d", ownSelections, foreignSelections, finals, locked)
 	}
-	t.Logf("shared-cap fixture: own enumerations=%d foreign fresh enumerations=%d final scans=%d; shared selection evidence retained", ownSelections, foreignSelections, finals)
+	t.Logf("shared-cap fixture: own enumerations=%d foreign fresh enumerations=%d final scans=%d", ownSelections, foreignSelections, finals)
 }
 
 func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
@@ -260,30 +259,45 @@ func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
 			} else {
 				snapshotErr = fmt.Errorf("fixture process snapshot unavailable")
 			}
-			oldSnapshot, oldFinal := snapshotWorktreeProcesses, findProcessesInWorktree
-			selections, finals := 0, 0
+			oldSnapshot, oldFinal, oldStage := snapshotWorktreeProcesses, findProcessesInWorktree, acquisitionStage
+			ownSelections, foreignSelections, finals := 0, 0, 0
+			inForeignWalk := false
+			acquisitionStage = func(stage, path string) {
+				if stage == "foreign-snapshot" {
+					inForeignWalk = true
+				}
+				oldStage(stage, path)
+			}
 			snapshotWorktreeProcesses = func() (process.WorktreeSnapshot, error) {
-				selections++
+				if !inForeignWalk {
+					ownSelections++
+					return oldSnapshot()
+				}
+				foreignSelections++
 				return snapshot, snapshotErr
 			}
 			findProcessesInWorktree = func(string) ([]process.ProcessInfo, error) {
 				finals++
 				return nil, nil
 			}
-			t.Cleanup(func() { snapshotWorktreeProcesses = oldSnapshot; findProcessesInWorktree = oldFinal })
+			t.Cleanup(func() {
+				snapshotWorktreeProcesses = oldSnapshot
+				findProcessesInWorktree = oldFinal
+				acquisitionStage = oldStage
+			})
 			got, err := AcquireLeaseInfoWithOptions(caller, pool, 1, nil, "selection risk", AcquireOptions{SkipFetch: true})
 			if err == nil || got.Path != "" {
 				t.Fatalf("foreign selection risk was allocated: %#v %v", got, err)
 			}
-			if selections != 1 || finals != 0 {
-				t.Fatalf("foreign selection refusal fell through: snapshots=%d final scans=%d", selections, finals)
+			if ownSelections != 1 || foreignSelections != 1 || finals != 0 {
+				t.Fatalf("foreign selection refusal fell through: own=%d foreign=%d final scans=%d", ownSelections, foreignSelections, finals)
 			}
 			assertFileContents(t, filepath.Join(path, "README.md"), "hi\n")
 			state, err := ReadState(pool)
 			if err != nil || len(state.Worktrees) != 1 || state.Worktrees[0].Leased || state.Worktrees[0].OwnerPID != 0 {
 				t.Fatalf("foreign selection refusal changed membership/reservation: %#v %v", state, err)
 			}
-			t.Logf("foreign selection %s refused; snapshots=%d final scans=%d; original checkout retained", risk, selections, finals)
+			t.Logf("foreign selection %s refused; own=%d foreign=%d final scans=%d; original checkout retained", risk, ownSelections, foreignSelections, finals)
 		})
 	}
 }

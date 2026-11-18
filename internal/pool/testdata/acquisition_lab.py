@@ -21,7 +21,7 @@ ARGS = PARSER.parse_args()
 BINARY = str(Path(ARGS.binary).resolve())
 REAL_GIT = shutil.which('git')
 ROOT = Path(tempfile.mkdtemp(prefix='treehouse-acquisition-lab-')).resolve()
-SOCKET_ROOT = tempfile.TemporaryDirectory(prefix='th-sync-', dir='/tmp')
+SOCKET_ROOT = tempfile.TemporaryDirectory(prefix='th-sync-')
 REPORT = []
 
 
@@ -66,7 +66,7 @@ if match:
   # A shim awaiting the controller is not a tenant of the candidate checkout,
   # except a preclaim hold: its working directory is exactly what is tested.
   if kind!='preclaim': os.chdir(root)
-  s=socket.socket(socket.AF_UNIX); s.connect(os.environ['LAB_SOCKET']); s.sendall(b'H'); s.recv(1); s.close()
+  s=socket.socket(socket.AF_UNIX); os.chdir(os.path.dirname(os.environ['LAB_SOCKET'])); s.connect(os.path.basename(os.environ['LAB_SOCKET'])); os.chdir(cwd if kind=='preclaim' else root); s.sendall(b'H'); s.recv(1); s.close()
   os.chdir(cwd)
 if os.environ.get('LAB_DELAY'): time.sleep(float(os.environ['LAB_DELAY']))
 os.execv(os.environ['LAB_REAL_GIT'],[os.environ['LAB_REAL_GIT']]+args)
@@ -160,13 +160,25 @@ class Fixture:
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
 
+def bind_server(server, fixture):
+    # AF_UNIX limits the address, not its resolved path. Bind a short name
+    # from the selected temp directory instead of escaping TMPDIR to /tmp.
+    previous = os.getcwd()
+    try:
+        os.chdir(fixture.socket_path.parent)
+        server.bind(fixture.socket_path.name)
+    finally:
+        os.chdir(previous)
+    server.listen()
+
+
 def concurrent(kind, count, spare, extra_capacity=0):
     foreign = kind.startswith('foreign')
     f = Fixture(count + spare, foreign=foreign)
     if extra_capacity:
         (f.caller/'treehouse.toml').write_text('max_trees = '+str(count + spare + extra_capacity)+'\n')
     server = socket.socket(socket.AF_UNIX)
-    server.bind(str(f.socket_path)); server.listen()
+    bind_server(server, f)
     processes = []
     connection = None
     try:
@@ -216,7 +228,7 @@ def concurrent(kind, count, spare, extra_capacity=0):
 
 def exclusive(kind):
     f = Fixture(1, foreign=kind.startswith('foreign'))
-    server=socket.socket(socket.AF_UNIX);server.bind(str(f.socket_path));server.listen()
+    server=socket.socket(socket.AF_UNIX);bind_server(server, f)
     first=f.start('exclusive-first',kind,f.paths[0]);connection=None
     try:
         connection,_=server.accept();assert connection.recv(1)==b'H'
@@ -244,7 +256,7 @@ def unfenced_identity():
     # must not be a process inside the checkout for the second get's snapshot.
     f = Fixture(1)
     server = socket.socket(socket.AF_UNIX)
-    server.bind(str(f.socket_path)); server.listen()
+    bind_server(server, f)
     first = f.start('preclaim-first', 'preclaim', f.paths[0]); connection = None
     try:
         connection, _ = server.accept()
@@ -293,7 +305,7 @@ def second_pass(guarded=False):
     processes = []
     connections = []
     server = socket.socket(socket.AF_UNIX)
-    server.bind(str(f.socket_path)); server.listen()
+    bind_server(server, f)
     try:
         assert tenant.stdout.readline().strip() == 'OWNER_READY'
         leased = f.command('lease', '1', '--lease-holder', 'live owner '+str(tenant.pid))
@@ -371,7 +383,7 @@ def second_pass(guarded=False):
 def fenced_return():
     f = Fixture(1)
     server = socket.socket(socket.AF_UNIX)
-    server.bind(str(f.socket_path)); server.listen()
+    bind_server(server, f)
     first = f.start('fenced-get', 'selection', f.paths[0])
     connection = None
     try:
@@ -518,7 +530,7 @@ def incremental_progress(foreign=False):
     f.env['TREEHOUSE_PROGRESS_SECRET'] = secret
     f.env['LAB_PROGRESS_PATHS'] = json.dumps(f.paths[1:])
     server = socket.socket(socket.AF_UNIX)
-    server.bind(str(f.socket_path)); server.listen()
+    bind_server(server, f)
     proc = f.start('incremental', 'progress-foreign' if foreign else 'progress')
     connection = None
     stderr = ''

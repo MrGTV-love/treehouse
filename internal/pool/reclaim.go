@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kunchenguid/treehouse/v3/internal/process"
 	"github.com/kunchenguid/treehouse/v3/internal/vcs"
 )
 
@@ -14,7 +13,9 @@ import (
 // Each candidate has its own fence and reservation; no VCS or process work
 // holds the pool lock. The removal and the caller's fresh claim are one state
 // write; the caller creates its own tree, never reuses a foreign one.
-func reclaimForeignWorktree(repoRoot, poolDir string, poolSize, firstSlot int, snapshot State, candidates []int, requester os.FileInfo, opts acquireOptions, selection process.WorktreeSnapshot, scanErr error, report func(string, string, string)) ([]string, *acquisitionClaim, error) {
+func reclaimForeignWorktree(repoRoot, poolDir string, poolSize, firstSlot int, snapshot State, candidates []int, requester os.FileInfo, opts acquireOptions, report func(string, string, string)) ([]string, *acquisitionClaim, error) {
+	acquisitionStage("foreign-snapshot", poolDir)
+	selection, scanErr := snapshotWorktreeProcesses()
 	var refusals []string
 	var fresh *acquisitionClaim
 	for _, index := range candidates {

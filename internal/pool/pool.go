@@ -697,7 +697,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	var reclaimDetails string
 	var claim *acquisitionClaim
 	if len(foreignCandidates) != 0 {
-		refusals, reclaimed, err := reclaimForeignWorktree(repoRoot, poolDir, poolSize, nextSlotNumber(snapshot), snapshot, foreignCandidates, commonDir, opts, selection, scanErr, report)
+		refusals, reclaimed, err := reclaimForeignWorktree(repoRoot, poolDir, poolSize, nextSlotNumber(snapshot), snapshot, foreignCandidates, commonDir, opts, report)
 		if err != nil {
 			return LeaseInfo{}, err
 		}
@@ -730,7 +730,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			}
 		}
 		if len(candidates) != 0 {
-			refusals, reclaimed, err := reclaimForeignWorktree(repoRoot, poolDir, poolSize, nextSlotNumber(current), current, candidates, commonDir, opts, selection, scanErr, report)
+			refusals, reclaimed, err := reclaimForeignWorktree(repoRoot, poolDir, poolSize, nextSlotNumber(current), current, candidates, commonDir, opts, report)
 			if err != nil {
 				return LeaseInfo{}, err
 			}

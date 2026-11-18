@@ -835,6 +835,11 @@ func TestAcquire_ForeignReclamationAcceptsLiveTipInAnyNamespace(t *testing.T) {
 }
 
 func TestAcquire_ForeignReclamationTemplatedFreshNameReusesRemovedName(t *testing.T) {
+	// A template beside the requester must not inherit an enclosing managed
+	// pool from the test runner's scratch directory. Use the OS temp default.
+	for _, name := range []string{"GOTMPDIR", "TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, "")
+	}
 	foreign, caller, poolDir := setupSharedClonePool(t)
 	path, err := Acquire(foreign, poolDir, 1, nil)
 	if err != nil {

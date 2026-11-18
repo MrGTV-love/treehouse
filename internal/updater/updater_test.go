@@ -831,7 +831,16 @@ func mkdirs(t *testing.T, dirs ...string) {
 
 // A caller standing in no worktree takes the temp directory as-is.
 func TestDetachedWorkingDirAcceptsATempDirOutsideAnyWorktree(t *testing.T) {
+	// The inherited scratch directory may itself be inside a checkout. This
+	// fixture needs the OS default temporary root, not that caller's scratch.
+	// testing.TempDir also honors GOTMPDIR independently of os.TempDir.
+	for _, name := range []string{"GOTMPDIR", "TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, "")
+	}
 	base := t.TempDir()
+	if root, err := enclosingWorktreeRoot(resolved(t, base)); err != nil || root != "" {
+		t.Fatalf("fixture root must be outside every worktree: %q (%v)", root, err)
+	}
 	caller := filepath.Join(base, "caller")
 	tmp := filepath.Join(base, "tmp")
 	mkdirs(t, caller, tmp)

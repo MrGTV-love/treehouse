@@ -71,7 +71,22 @@ type WorktreeEntry struct {
 	// It is kept so their state still parses; this version never sets or
 	// reports it, and clearing the lease clears it.
 	RecoveryReason string `json:"recovery_reason,omitempty"`
+	// HandoffLeaseID and HandedOffAt record a recovered-lease handoff. They are
+	// set together under the state lock, and the marker is current only while
+	// HandoffLeaseID is still the entry's LeaseID, so any later acquisition
+	// (which mints a new LeaseID) makes it inert without clearing it. HandedOffAt
+	// is the time a bulk return compares with its own process start: a run that
+	// started at or before it began before the handoff completed. While the
+	// handoff is in flight it holds handoffPending, a time no run starts before
+	// and a crash between the two state writes leaves in place, so every bulk
+	// return then leaves the slot alone until it is returned by name.
+	HandoffLeaseID string     `json:"handoff_lease_id,omitempty"`
+	HandedOffAt    *time.Time `json:"handed_off_at,omitempty"`
 }
+
+// handoffPending is HandedOffAt while a recovered-lease handoff is between its
+// holder change and the write that records when it completed.
+var handoffPending = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
 
 func newLeaseID() (string, error) {
 	var id [16]byte

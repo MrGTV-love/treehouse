@@ -1014,7 +1014,19 @@ type ReleasePreconditions struct {
 	// release sets it so an entry recovered after the listing, under the same
 	// state lock as the release, is left for a return that names it.
 	RefuseRecovered bool
+	// BulkStartedAt, when set, refuses a worktree whose current lease came from a
+	// recovered-lease handoff that completed at or after this instant (a tie
+	// counts as before). A bulk return sets it to its own process start, so a run
+	// that began before a handoff completed never releases the slot it handed
+	// over, however late the run reaches its listing; a run that started after
+	// the handoff, and a later ordinary acquisition of the same slot, are not
+	// affected. Named returns do not set it.
+	BulkStartedAt *time.Time
 }
+
+// ErrHandedOffEntry reports that a release carrying BulkStartedAt found a lease
+// that a recovered-lease handoff completed no earlier than the run's start.
+var ErrHandedOffEntry = errors.New("handed-off entry")
 
 // Release resets a managed worktree, clears its short-lived owner reservation or
 // durable lease, and returns it to the available pool. It retains the legacy
@@ -1178,6 +1190,10 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 	}
 	if preconditions.RefuseRecovered && wt.Leased && wt.LeaseHolder == RecoveredLeaseHolder {
 		return fmt.Errorf("%w: worktree %s was recovered and is only returned by name", ErrRecoveredEntry, wt.Path)
+	}
+	if preconditions.BulkStartedAt != nil && wt.Leased && wt.HandoffLeaseID != "" && wt.HandoffLeaseID == wt.LeaseID &&
+		wt.HandedOffAt != nil && !wt.HandedOffAt.Before(*preconditions.BulkStartedAt) {
+		return fmt.Errorf("%w: worktree %s was handed to %q by a recovered-lease handoff that completed after this run began", ErrHandedOffEntry, wt.Path, wt.LeaseHolder)
 	}
 	if preconditions.ExpectedReservation != nil && reservationOf(wt) != *preconditions.ExpectedReservation {
 		return fmt.Errorf("%w: worktree %s is no longer reserved as it was observed", ErrLeasePreconditionFailed, wt.Path)

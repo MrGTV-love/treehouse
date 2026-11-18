@@ -411,6 +411,10 @@ func TestRecoveredHandoffRefusals(t *testing.T) {
 			// A refusal that unleases the slot and writes the old bytes back keeps the
 			// bytes but replaces the file, which its change time and mtime show.
 			stateBefore := handoffInventory(t, filepath.Dir(state))[filepath.Base(state)]
+			stopWatcher := func() (int, int) { return 1, 0 }
+			if kind != "unreadable-state" && kind != "corrupt-state" {
+				stopWatcher = watchStateIdentity(t, state)
+			}
 			_, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root, "TREEHOUSE_LEASE_HOLDER=environment-task"}, args...)
 			if code == 0 || !strings.Contains(stderr, reason) {
 				t.Fatalf("%s refusal: code=%d want=%q stderr=%s", kind, code, reason, stderr)
@@ -429,6 +433,9 @@ func TestRecoveredHandoffRefusals(t *testing.T) {
 			}
 			if after := handoffInventory(t, filepath.Dir(path)); !reflect.DeepEqual(before, after) {
 				t.Fatalf("refusal changed slot inventory:%s", handoffInventoryDiff(before, after))
+			}
+			if distinct, samples := stopWatcher(); distinct != 1 {
+				t.Fatalf("%s refusal changed the state file's identity while it ran (%d identities in %d samples)", kind, distinct, samples)
 			}
 			if stateAfter := handoffInventory(t, filepath.Dir(state))[filepath.Base(state)]; !reflect.DeepEqual(stateBefore, stateAfter) {
 				t.Fatalf("refusal rewrote the state file (metadata %+v -> %+v)", stateBefore, stateAfter)
@@ -453,7 +460,7 @@ func TestRecoveredHandoffObserver(t *testing.T) {
 		}
 		// Shared read: on Windows an ordinary open handle (no FILE_SHARE_DELETE)
 		// would make the state commit fail with a sharing violation.
-		data, err := pool.ReadFileShared(state)
+		data, err := readFileShared(state)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -487,7 +494,7 @@ func TestRecoveredHandoffObserver(t *testing.T) {
 }
 
 // The observer runs on every platform. It reads the state file through
-// pool.ReadFileShared, which opens with FILE_SHARE_DELETE on Windows, so it
+// readFileShared, which opens with FILE_SHARE_DELETE on Windows, so it
 // never makes the state commit (ReplaceFileW) fail with a sharing violation.
 // stop reports what the observer saw; an error means it saw the target unleased
 // or missing, or made no observation.

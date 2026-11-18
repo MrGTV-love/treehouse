@@ -1,6 +1,6 @@
 //go:build windows
 
-package pool
+package cmd
 
 import (
 	"io"
@@ -10,12 +10,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// ReadFileShared reads a file with FILE_SHARE_DELETE as well as read and write
-// sharing. Go's os.ReadFile opens without FILE_SHARE_DELETE, and while such a
-// handle is open the state commit (ReplaceFileW in state_file_windows.go) fails
-// with a sharing violation. A reader that must not disturb a writer, such as
-// the recovered-entry snapshot of `return --all` or a test observer, uses this.
-func ReadFileShared(path string) ([]byte, error) {
+// readFileShared opens with FILE_SHARE_DELETE as well as read and write
+// sharing. Go's os.ReadFile does not, and while such a handle is open the state
+// commit (ReplaceFileW) fails with a sharing violation, which would fail the
+// racing commands for a test-only reason.
+func readFileShared(path string) ([]byte, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: err}

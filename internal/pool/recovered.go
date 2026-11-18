@@ -8,10 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 )
+
+// afterHandoffHolderWrite lets a test observe the state between the handoff's
+// holder change and the write that records its completion time.
+var afterHandoffHolderWrite func()
 
 // HandoffRecoveredLease replaces a recovered holder in place. It does not run
 // recovery or healing: the caller must first inspect a persisted quarantine and
@@ -97,10 +102,28 @@ func HandoffRecoveredLease(poolDir, path, expectedHolder, holder string) (LeaseI
 		if !wt.SeedInventoryKnown {
 			setSeedInventory(wt, nil, true)
 		}
+		// The holder change is one replacement. The marker for bulk returns that
+		// began before it is written pending, so a crash after this write leaves
+		// those runs refused, never admitted.
+		wt.HandoffLeaseID = wt.LeaseID
+		pending := handoffPending
+		wt.HandedOffAt = &pending
 		if err := WriteState(poolDir, state); err != nil {
 			return err
 		}
 		lease = leaseInfoFromEntry(*wt, wt.BaseBranch)
+		if afterHandoffHolderWrite != nil {
+			afterHandoffHolderWrite()
+		}
+		// The completion time is read after that write has committed, so no run
+		// that started before the handoff completed can start after it. Still
+		// under the lock, the slot is leased throughout; this write only replaces
+		// the pending marker with that time.
+		done := time.Now()
+		wt.HandedOffAt = &done
+		if err := WriteState(poolDir, state); err != nil {
+			return fmt.Errorf("handoff committed, but recording its completion time failed (bulk returns leave this slot alone until it is returned by name): %w", err)
+		}
 		return nil
 	})
 	return lease, err
@@ -119,37 +142,6 @@ func StateFileEntryExists(poolDir string) (bool, error) {
 		return false, nil
 	}
 	return false, err
-}
-
-// RecoveredEntryNames is the snapshot a bulk return takes as its very first
-// read of the pool. It lists, by entry name, every entry that is recovered at
-// that instant, from one lock-free read of the state file that never recovers,
-// heals or writes anything. `return --all` never releases an entry named here,
-// even when a handoff gives it an ordinary lease before the run lists the pool:
-// the run began before that handoff completed. A read that fails for a reason
-// other than "no file" is an error, so the caller releases nothing. A file that
-// is missing, does not parse or has an older version yields no names because
-// the listing that follows recovers every slot as recovered and the run skips
-// each of them.
-func RecoveredEntryNames(poolDir string) (map[string]bool, error) {
-	data, err := ReadFileShared(stateFilePath(poolDir))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading recovered-entry snapshot: %w", err)
-	}
-	var state State
-	if json.Unmarshal(data, &state) != nil || state.Version != stateVersion {
-		return nil, nil
-	}
-	names := map[string]bool{}
-	for _, wt := range state.Worktrees {
-		if wt.Leased && wt.LeaseHolder == RecoveredLeaseHolder {
-			names[wt.Name] = true
-		}
-	}
-	return names, nil
 }
 
 // A recovered entry (see RecoveredLeaseHolder) is a persistent quarantine:

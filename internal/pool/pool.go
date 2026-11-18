@@ -91,8 +91,9 @@ type WorktreeStatus struct {
 
 // Reservation is the persisted claim on one slot at one instant: its durable
 // lease (the lease id together with the holder, which is the lease identity a
-// recovered-lease handoff changes in one write) and its short-lived owner. The owner pair identifies a process the way
-// ownerAlive does, because a PID alone can be reused by an unrelated process.
+// recovered-lease handoff changes in one write) and its short-lived owner. The
+// owner pair identifies a process the way ownerAlive does, because a PID alone
+// can be reused by an unrelated process.
 type Reservation struct {
 	Leased         bool
 	LeaseID        string

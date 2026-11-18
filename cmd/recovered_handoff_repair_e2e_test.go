@@ -83,7 +83,7 @@ func TestRecoveredHandoffEveryRecoveredOrigin(t *testing.T) {
 			}
 			afterEntry := handoffStateEntry(t, state)
 			changed := changedEntryKeys(beforeEntry, afterEntry)
-			leaseFields := []string{"handed_off_at", "handoff_lease_id", "lease_holder", "lease_id", "leased_at"}
+			leaseFields := []string{"lease_holder", "lease_id", "leased_at"}
 			var want []string
 			if origin == "earlier-version-known-inventory" {
 				want = append(append(want, leaseFields...), "recovery_reason")
@@ -155,11 +155,21 @@ func TestRecoveredHandoffUnknownInventoryDeletesNothingLater(t *testing.T) {
 			if _, stderr, code := runTreehouse(t, repo, home, env, handoffArgs(path, "real-task")...); code != 0 {
 				t.Fatalf("handoff: %d %s", code, stderr)
 			}
+			// Every path present at handoff must still exist, and every file must
+			// keep its content, after each later step.
+			contents := map[string]string{kept[0]: "not the pool's\n", kept[2]: "inside\n"}
 			present := func(step string) {
 				t.Helper()
 				for _, f := range kept {
-					if _, err := os.Lstat(f); err != nil {
+					info, err := os.Lstat(f)
+					if err != nil {
 						t.Fatalf("%s deleted %s that was present at handoff: %v", step, f, err)
+					}
+					if want, isFile := contents[f]; isFile {
+						got, err := os.ReadFile(f)
+						if err != nil || string(got) != want || !info.Mode().IsRegular() {
+							t.Fatalf("%s changed %s: %q (%v), want %q", step, f, got, err, want)
+						}
 					}
 				}
 			}
@@ -221,18 +231,30 @@ func setProcessStartedAt(t *testing.T, started time.Time) {
 	t.Cleanup(func() { processStartedAt = saved })
 }
 
+// handoffEntryStamp returns the boundary of the fence the handoff left for the
+// slot's current lease. The fence is a file beside the state file, named for the
+// lease; the state entry itself carries no handoff field.
 func handoffEntryStamp(t *testing.T, state string) time.Time {
 	t.Helper()
 	entry := handoffStateEntry(t, state)
-	raw, ok := entry["handed_off_at"].(string)
-	if !ok || entry["handoff_lease_id"] != entry["lease_id"] {
-		t.Fatalf("handoff left no completion marker bound to its lease: %v", entry)
+	for key := range entry {
+		if strings.Contains(key, "handoff") || strings.Contains(key, "handed_off") {
+			t.Fatalf("the state entry carries a handoff field %q: %v", key, entry)
+		}
 	}
-	at, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil || at.Year() > 3000 {
-		t.Fatalf("handoff completion time %q (%v) is missing or still pending", raw, err)
+	leaseID, _ := entry["lease_id"].(string)
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(state), "treehouse-handoff-"+leaseID+".fence"))
+	if err != nil {
+		t.Fatalf("handoff left no fence for lease %q: %v", leaseID, err)
 	}
-	return at
+	var fence struct {
+		LeaseID  string    `json:"lease_id"`
+		Boundary time.Time `json:"boundary"`
+	}
+	if err := json.Unmarshal(data, &fence); err != nil || fence.LeaseID != leaseID || fence.Boundary.Year() > 3000 {
+		t.Fatalf("handoff fence %s (%v) is not sealed for lease %q", data, err, leaseID)
+	}
+	return fence.Boundary
 }
 
 // J1 on every platform: a `return --all` that started at or before the moment a

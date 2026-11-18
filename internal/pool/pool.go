@@ -1015,12 +1015,12 @@ type ReleasePreconditions struct {
 	// state lock as the release, is left for a return that names it.
 	RefuseRecovered bool
 	// BulkStartedAt, when set, refuses a worktree whose current lease came from a
-	// recovered-lease handoff that completed at or after this instant (a tie
-	// counts as before). A bulk return sets it to its own process start, so a run
-	// that began before a handoff completed never releases the slot it handed
-	// over, however late the run reaches its listing; a run that started after
-	// the handoff, and a later ordinary acquisition of the same slot, are not
-	// affected. Named returns do not set it.
+	// recovered-lease handoff whose fence boundary is at or after this instant (a
+	// tie counts as before; see handoff_fence.go). A bulk return sets it to its own
+	// process start, so a run that began before a handoff completed never releases
+	// the slot it handed over, however late the run reaches its listing; a run that
+	// started after the handoff, and a later ordinary acquisition of the same slot,
+	// are not affected. Named returns do not set it.
 	BulkStartedAt *time.Time
 }
 
@@ -1056,7 +1056,7 @@ func ValidateReleasePreconditions(poolDir, worktreePath string, preconditions Re
 		if err != nil {
 			return err
 		}
-		if _, err := releasableWorktree(&state, worktreePath, preconditions); err != nil {
+		if _, err := releasableWorktree(poolDir, &state, worktreePath, preconditions); err != nil {
 			return err
 		}
 		if guarded == nil {
@@ -1097,7 +1097,7 @@ func ReleaseConditional(poolDir, worktreePath, baseBranch string, preconditions 
 			return err
 		}
 
-		wt, err := releasableWorktree(&state, worktreePath, preconditions)
+		wt, err := releasableWorktree(poolDir, &state, worktreePath, preconditions)
 		if err != nil {
 			return err
 		}
@@ -1148,12 +1148,17 @@ func ReleaseConditional(poolDir, worktreePath, baseBranch string, preconditions 
 			wt.BaseBranch = requested
 		}
 
+		leaseID := wt.LeaseID
 		releaseEntry(wt)
-		return WriteState(poolDir, state)
+		if err := WriteState(poolDir, state); err != nil {
+			return err
+		}
+		removeHandoffFence(poolDir, leaseID)
+		return nil
 	})
 }
 
-func releasableWorktree(state *State, worktreePath string, preconditions ReleasePreconditions) (*WorktreeEntry, error) {
+func releasableWorktree(poolDir string, state *State, worktreePath string, preconditions ReleasePreconditions) (*WorktreeEntry, error) {
 	for i := range state.Worktrees {
 		wt := &state.Worktrees[i]
 		if !samePath(wt.Path, worktreePath) {
@@ -1162,7 +1167,7 @@ func releasableWorktree(state *State, worktreePath string, preconditions Release
 		if wt.Destroying {
 			return nil, fmt.Errorf("worktree %s is being destroyed", worktreePath)
 		}
-		if err := validateReleasePreconditions(*wt, preconditions); err != nil {
+		if err := validateReleasePreconditions(poolDir, *wt, preconditions); err != nil {
 			return nil, err
 		}
 		return wt, nil
@@ -1179,7 +1184,7 @@ func (p ReleasePreconditions) check() error {
 	return nil
 }
 
-func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePreconditions) error {
+func validateReleasePreconditions(poolDir string, wt WorktreeEntry, preconditions ReleasePreconditions) error {
 	if preconditions.RequireOwnedByCaller {
 		if err := checkOwnedByCaller(wt); err != nil {
 			return err
@@ -1191,9 +1196,10 @@ func validateReleasePreconditions(wt WorktreeEntry, preconditions ReleasePrecond
 	if preconditions.RefuseRecovered && wt.Leased && wt.LeaseHolder == RecoveredLeaseHolder {
 		return fmt.Errorf("%w: worktree %s was recovered and is only returned by name", ErrRecoveredEntry, wt.Path)
 	}
-	if preconditions.BulkStartedAt != nil && wt.Leased && wt.HandoffLeaseID != "" && wt.HandoffLeaseID == wt.LeaseID &&
-		wt.HandedOffAt != nil && !wt.HandedOffAt.Before(*preconditions.BulkStartedAt) {
-		return fmt.Errorf("%w: worktree %s was handed to %q by a recovered-lease handoff that completed after this run began", ErrHandedOffEntry, wt.Path, wt.LeaseHolder)
+	if preconditions.BulkStartedAt != nil {
+		if err := refuseFencedBulkReturn(poolDir, wt, *preconditions.BulkStartedAt); err != nil {
+			return err
+		}
 	}
 	if preconditions.ExpectedReservation != nil && reservationOf(wt) != *preconditions.ExpectedReservation {
 		return fmt.Errorf("%w: worktree %s is no longer reserved as it was observed", ErrLeasePreconditionFailed, wt.Path)

@@ -541,38 +541,98 @@ func startHandoffObserver(t *testing.T, state, path string) (stop func() (string
 	}
 }
 
+// lifecycleRace is one operation raced against a handoff. check sees the real
+// result of the operation, so a prune that removed something, or a destroy that
+// was accepted, fails here and not only in the inventory.
+type lifecycleRace struct {
+	name  string
+	args  func(path string) []string
+	check func(t *testing.T, path, out, stderr string, code int)
+}
+
+var lifecycleRaces = []lifecycleRace{
+	{
+		name: "get",
+		args: func(string) []string { return []string{"get", "--lease", "--json"} },
+		check: func(t *testing.T, path, out, stderr string, code int) {
+			var lease leaseJSONResult
+			if code != 0 || json.Unmarshal([]byte(out), &lease) != nil || lease.Path == path || lease.Path == "" {
+				t.Errorf("racing get did not take another slot: %d %s %s", code, out, stderr)
+			}
+		},
+	},
+	{
+		name: "prune",
+		args: func(string) []string { return []string{"prune", "--yes"} },
+		check: func(t *testing.T, path, out, stderr string, code int) {
+			if code != 0 || !strings.Contains(out, "No stale worktrees pruned.") {
+				t.Errorf("racing prune did not report that it pruned nothing: %d %s %s", code, out, stderr)
+			}
+		},
+	},
+	{
+		name: "destroy",
+		args: func(path string) []string { return []string{"destroy", path, "--yes"} },
+		check: func(t *testing.T, path, out, stderr string, code int) {
+			if code == 0 || !strings.Contains(out, "Destroyed 0 worktrees") || !strings.Contains(stderr, "did not destroy 1") {
+				t.Errorf("racing destroy of a leased slot was not refused as 0 destroyed, 1 skipped: %d %s %s", code, out, stderr)
+			}
+		},
+	},
+}
+
+// handoffSlotContents writes files that a reset, a clean, a prune or a destroy
+// would each remove, so the inventory comparison can see any of them.
+func handoffSlotContents(t *testing.T, path string) {
+	t.Helper()
+	for file, content := range map[string]string{"task-notes.txt": "unsaved task notes\n", filepath.Join("scratch", "draft.txt"): "draft\n"} {
+		full := filepath.Join(path, file)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// R4-F4: every raced operation is run apart, its real result is checked, and the
+// full inventory of the slot (every path, mode, size, mtime, ctime and content
+// hash) is compared with what it was before the race. A destructive handoff, or
+// a prune or destroy that got past the lease, changes the inventory even when the
+// slot directory still exists.
 func TestRecoveredHandoffConcurrentLifecycle(t *testing.T) {
-	const iterations = 8
-	for iteration := range iterations {
-		repo, home, root, path, state := handoffFixture(t)
-		stopObserver := startHandoffObserver(t, state, path)
-		var wg sync.WaitGroup
-		for _, args := range [][]string{{"get", "--lease", "--json"}, {"prune", "--yes"}, {"destroy", path, "--yes"}} {
-			wg.Add(1)
-			go func(args []string) {
-				defer wg.Done()
-				out, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, args...)
-				if args[0] == "get" {
-					var lease leaseJSONResult
-					if code != 0 || json.Unmarshal([]byte(out), &lease) != nil || lease.Path == path {
-						t.Errorf("racing get: %d %s %s", code, out, stderr)
-					}
+	const iterations = 4
+	for _, race := range lifecycleRaces {
+		for iteration := range iterations {
+			t.Run(fmt.Sprintf("%s-%d", race.name, iteration), func(t *testing.T) {
+				repo, home, root, path, state := handoffFixture(t)
+				handoffSlotContents(t, path)
+				before := handoffInventory(t, filepath.Dir(path))
+				stopObserver := startHandoffObserver(t, state, path)
+				var wg sync.WaitGroup
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					out, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, race.args(path)...)
+					t.Logf("racing %s: code=%d stdout=%q stderr=%q", race.name, code, out, stderr)
+					race.check(t, path, out, stderr, code)
+				}()
+				_, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, handoffArgs(path, "real-task")...)
+				wg.Wait()
+				observed, observerErr := stopObserver()
+				if observerErr != nil {
+					t.Fatal(observerErr)
 				}
-			}(args)
+				if code != 0 {
+					t.Fatalf("handoff: %d %s", code, stderr)
+				}
+				if after := handoffInventory(t, filepath.Dir(path)); !reflect.DeepEqual(before, after) {
+					t.Fatalf("racing %s changed the slot:%s", race.name, handoffInventoryDiff(before, after))
+				}
+				t.Logf("iteration=%d %s", iteration, observed)
+			})
 		}
-		_, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, handoffArgs(path, "real-task")...)
-		wg.Wait()
-		observed, observerErr := stopObserver()
-		if observerErr != nil {
-			t.Fatal(observerErr)
-		}
-		if code != 0 {
-			t.Fatalf("handoff: %d %s", code, stderr)
-		}
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("racing lifecycle removed target: %v", err)
-		}
-		t.Logf("iteration=%d %s", iteration, observed)
 	}
 }
 

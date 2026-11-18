@@ -14,10 +14,6 @@ import (
 	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 )
 
-// afterHandoffHolderWrite lets a test observe the state between the handoff's
-// holder change and the write that records its completion time.
-var afterHandoffHolderWrite func()
-
 // HandoffRecoveredLease replaces a recovered holder in place. It does not run
 // recovery or healing: the caller must first inspect a persisted quarantine and
 // verify who owns its contents. The exact path and expected holder are checked
@@ -38,6 +34,7 @@ func HandoffRecoveredLease(poolDir, path, expectedHolder, holder string) (LeaseI
 	}
 
 	var lease LeaseInfo
+	var boundary time.Time
 	err := WithStateLock(poolDir, func() error {
 		// ReadState intentionally recovers corrupt JSON and unauthenticated
 		// entries. A handoff must instead refuse those inputs, not manufacture
@@ -102,30 +99,38 @@ func HandoffRecoveredLease(poolDir, path, expectedHolder, holder string) (LeaseI
 		if !wt.SeedInventoryKnown {
 			setSeedInventory(wt, nil, true)
 		}
-		// The holder change is one replacement. The marker for bulk returns that
-		// began before it is written pending, so a crash after this write leaves
-		// those runs refused, never admitted.
-		wt.HandoffLeaseID = wt.LeaseID
-		pending := handoffPending
-		wt.HandedOffAt = &pending
+		// The fence goes first, pending, so no instant has the new holder committed
+		// without it. The holder change is then one replacement, and the seal that
+		// follows replaces only the pending boundary. See handoff_fence.go.
+		removeOrphanHandoffFences(poolDir, state)
+		fenceStarted := time.Now()
+		if err := writeHandoffFence(poolDir, wt.LeaseID, handoffPending); err != nil {
+			return fmt.Errorf("recording handoff fence: %w", err)
+		}
+		firstWrite := time.Since(fenceStarted)
+		if beforeHandoffHolderWrite != nil {
+			beforeHandoffHolderWrite()
+		}
 		if err := WriteState(poolDir, state); err != nil {
+			removeHandoffFence(poolDir, wt.LeaseID)
 			return err
 		}
 		lease = leaseInfoFromEntry(*wt, wt.BaseBranch)
 		if afterHandoffHolderWrite != nil {
 			afterHandoffHolderWrite()
 		}
-		// The completion time is read after that write has committed, so no run
-		// that started before the handoff completed can start after it. Still
-		// under the lock, the slot is leased throughout; this write only replaces
-		// the pending marker with that time.
-		done := time.Now()
-		wt.HandedOffAt = &done
-		if err := WriteState(poolDir, state); err != nil {
-			return fmt.Errorf("handoff committed, but recording its completion time failed (bulk returns leave this slot alone until it is returned by name): %w", err)
+		sealed, err := sealHandoffFence(poolDir, wt.LeaseID, firstWrite)
+		if err != nil {
+			return fmt.Errorf("handoff committed, but sealing its fence failed (bulk returns leave this slot alone until it is returned by name): %w", err)
 		}
+		boundary = sealed
 		return nil
 	})
+	// The command ends only once its boundary is in the past, so a bulk return that
+	// starts after this command returns starts after the boundary and is ordinary.
+	if err == nil {
+		time.Sleep(time.Until(boundary))
+	}
 	return lease, err
 }
 

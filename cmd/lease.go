@@ -139,6 +139,9 @@ func leaseRunE(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return err
 			}
+			if !pool.IsPoolDir(poolDir) {
+				return fmt.Errorf("worktree %s is not managed by treehouse", path)
+			}
 		}
 		lease, err := pool.HandoffRecoveredLease(poolDir, path, leaseExpectedHolderFlag, leaseHolderFlag)
 		if err != nil {

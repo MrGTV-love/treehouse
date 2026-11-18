@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -196,6 +197,19 @@ func TestRecoveredHandoffExactPathSelectsItsOwnPool(t *testing.T) {
 	t.Logf("slot-1 paths distinct: %s and %s; target state=%s", pathA, pathB, stateB)
 }
 
+func TestRecoveredHandoffRefusesPathOutsideAnyPoolWithoutCreatingOne(t *testing.T) {
+	repo, home := setupTestRepo(t)
+	root := filepath.Join(home, "scratch-pools")
+	_, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, handoffArgs(repo, "real-task")...)
+	if code == 0 || !strings.Contains(stderr, "not managed by treehouse") {
+		t.Fatalf("non-pool path not refused: %d %s", code, stderr)
+	}
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		entries, _ := os.ReadDir(root)
+		t.Fatalf("refusal created pool root %s: %v %v", root, err, entries)
+	}
+}
+
 func TestRecoveredHandoffRefusals(t *testing.T) {
 	for _, kind := range []string{"unleased", "ordinary", "destroying", "unknown-path", "unknown-name", "stale-holder", "empty-holder", "recovered-holder", "control-holder", "corrupt-state", "unreadable-state", "missing-expectation", "name-only", "blank-holder", "missing-label", "unsupported-state", "missing-directory"} {
 		t.Run(kind, func(t *testing.T) {
@@ -378,39 +392,60 @@ func TestRecoveredHandoffObserver(t *testing.T) {
 	t.Logf("observer samples=%d", samples)
 }
 
+// On Windows an open read handle makes ReplaceFileW in the state commit path
+// fail with a sharing violation, so the tight-loop observer would fail the
+// racing commands for a test-only reason; the race still runs there unobserved.
+func startHandoffObserver(t *testing.T, state, path string) (stop func() string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return func() string { return "" }
+	}
+	observer := exec.Command(os.Args[0], "-test.run=^TestRecoveredHandoffObserver$", "-test.v")
+	observer.Env = append(os.Environ(), "TREEHOUSE_HANDOFF_OBSERVER="+state, "TREEHOUSE_HANDOFF_TARGET="+path)
+	pipe, err := observer.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observerErr bytes.Buffer
+	observer.Stderr = &observerErr
+	if err := observer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if observer.ProcessState == nil {
+			_ = observer.Process.Kill()
+			_ = observer.Wait()
+		}
+	})
+	// Read through the explicit readiness marker before starting any mutation.
+	var prefix bytes.Buffer
+	one := make([]byte, 1)
+	for !strings.Contains(prefix.String(), "observer-ready\n") {
+		if _, err := io.ReadFull(pipe, one); err != nil {
+			t.Fatalf("observer startup: %v %s", err, observerErr.String())
+		}
+		prefix.Write(one)
+	}
+	var rest bytes.Buffer
+	drained := make(chan struct{})
+	go func() { _, _ = io.Copy(&rest, pipe); close(drained) }()
+	return func() string {
+		if err := os.WriteFile(state+".observer-stop", nil, 0644); err != nil {
+			t.Fatal(err)
+		}
+		<-drained
+		if err := observer.Wait(); err != nil {
+			t.Fatalf("observer failed: %v %s %s %s", err, prefix.String(), rest.String(), observerErr.String())
+		}
+		return rest.String()
+	}
+}
+
 func TestRecoveredHandoffConcurrentLifecycle(t *testing.T) {
 	const iterations = 8
 	for iteration := range iterations {
 		repo, home, root, path, state := handoffFixture(t)
-		observer := exec.Command(os.Args[0], "-test.run=^TestRecoveredHandoffObserver$", "-test.v")
-		observer.Env = append(os.Environ(), "TREEHOUSE_HANDOFF_OBSERVER="+state, "TREEHOUSE_HANDOFF_TARGET="+path)
-		pipe, err := observer.StdoutPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var observerErr bytes.Buffer
-		observer.Stderr = &observerErr
-		if err := observer.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if observer.ProcessState == nil {
-				_ = observer.Process.Kill()
-				_ = observer.Wait()
-			}
-		})
-		// Read through the explicit readiness marker before starting any mutation.
-		var prefix bytes.Buffer
-		one := make([]byte, 1)
-		for !strings.Contains(prefix.String(), "observer-ready\n") {
-			if _, err := io.ReadFull(pipe, one); err != nil {
-				t.Fatalf("observer startup: %v %s", err, observerErr.String())
-			}
-			prefix.Write(one)
-		}
-		var rest bytes.Buffer
-		drained := make(chan struct{})
-		go func() { _, _ = io.Copy(&rest, pipe); close(drained) }()
+		stopObserver := startHandoffObserver(t, state, path)
 		var wg sync.WaitGroup
 		for _, args := range [][]string{{"get", "--lease", "--json"}, {"prune", "--yes"}, {"destroy", path, "--yes"}} {
 			wg.Add(1)
@@ -427,20 +462,13 @@ func TestRecoveredHandoffConcurrentLifecycle(t *testing.T) {
 		}
 		_, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, handoffArgs(path, "real-task")...)
 		wg.Wait()
-		if err := os.WriteFile(state+".observer-stop", nil, 0644); err != nil {
-			t.Fatal(err)
-		}
-		<-drained
-		observerResult := observer.Wait()
-		if observerResult != nil {
-			t.Fatalf("observer failed: %v %s %s %s", observerResult, prefix.String(), rest.String(), observerErr.String())
-		}
+		observed := stopObserver()
 		if code != 0 {
 			t.Fatalf("handoff: %d %s", code, stderr)
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("racing lifecycle removed target: %v", err)
 		}
-		t.Logf("iteration=%d %s", iteration, rest.String())
+		t.Logf("iteration=%d %s", iteration, observed)
 	}
 }

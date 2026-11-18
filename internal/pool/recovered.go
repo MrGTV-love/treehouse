@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
@@ -34,7 +33,6 @@ func HandoffRecoveredLease(poolDir, path, expectedHolder, holder string) (LeaseI
 	}
 
 	var lease LeaseInfo
-	var boundary time.Time
 	err := WithStateLock(poolDir, func() error {
 		// ReadState intentionally recovers corrupt JSON and unauthenticated
 		// entries. A handoff must instead refuse those inputs, not manufacture
@@ -99,38 +97,17 @@ func HandoffRecoveredLease(poolDir, path, expectedHolder, holder string) (LeaseI
 		if !wt.SeedInventoryKnown {
 			setSeedInventory(wt, nil, true)
 		}
-		// The fence goes first, pending, so no instant has the new holder committed
-		// without it. The holder change is then one replacement, and the seal that
-		// follows replaces only the pending boundary. See handoff_fence.go.
-		removeOrphanHandoffFences(poolDir, state)
-		fenceStarted := time.Now()
-		if err := writeHandoffFence(poolDir, wt.LeaseID, handoffPending); err != nil {
-			return fmt.Errorf("recording handoff fence: %w", err)
-		}
-		firstWrite := time.Since(fenceStarted)
-		if beforeHandoffHolderWrite != nil {
-			beforeHandoffHolderWrite()
-		}
+		// One replacement of the entry changes the lease identity (a new lease id
+		// and the new holder). A bulk return releases a slot only if the identity it
+		// enumerated is still the stored one, checked under this same lock, so one
+		// that enumerated the recovered entry cannot release the new holder. There
+		// is no other record of the handoff.
 		if err := WriteState(poolDir, state); err != nil {
-			removeHandoffFence(poolDir, wt.LeaseID)
 			return err
 		}
 		lease = leaseInfoFromEntry(*wt, wt.BaseBranch)
-		if afterHandoffHolderWrite != nil {
-			afterHandoffHolderWrite()
-		}
-		sealed, err := sealHandoffFence(poolDir, wt.LeaseID, firstWrite)
-		if err != nil {
-			return fmt.Errorf("handoff committed, but sealing its fence failed (bulk returns leave this slot alone until it is returned by name): %w", err)
-		}
-		boundary = sealed
 		return nil
 	})
-	// The command ends only once its boundary is in the past, so a bulk return that
-	// starts after this command returns starts after the boundary and is ordinary.
-	if err == nil {
-		time.Sleep(time.Until(boundary))
-	}
 	return lease, err
 }
 

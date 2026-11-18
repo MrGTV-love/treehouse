@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,24 +155,50 @@ func TestRecoveredHandoffUnknownInventoryDeletesNothingLater(t *testing.T) {
 			if err := os.WriteFile(kept[2], []byte("inside\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			// Every path present before the handoff (except the git link itself, which a
+			// return rewrites) must still exist after each later step, files with
+			// their content, and nothing but the paths below may differ.
+			before := map[string]string{}
+			if err := filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				rel, err := filepath.Rel(path, p)
+				if err != nil || rel == ".git" || rel == "." {
+					return err
+				}
+				if d.IsDir() {
+					before[rel] = "dir"
+					return nil
+				}
+				data, err := os.ReadFile(p)
+				before[rel] = string(data)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(before) < 4 {
+				t.Fatalf("the fixture slot holds too little to prove anything: %v", before)
+			}
 			if _, stderr, code := runTreehouse(t, repo, home, env, handoffArgs(path, "real-task")...); code != 0 {
 				t.Fatalf("handoff: %d %s", code, stderr)
 			}
-			// Every path present at handoff must still exist, and every file must
-			// keep its content, after each later step.
-			contents := map[string]string{kept[0]: "not the pool's\n", kept[2]: "inside\n"}
 			present := func(step string) {
 				t.Helper()
-				for _, f := range kept {
-					info, err := os.Lstat(f)
+				for rel, want := range before {
+					info, err := os.Lstat(filepath.Join(path, rel))
 					if err != nil {
-						t.Fatalf("%s deleted %s that was present at handoff: %v", step, f, err)
+						t.Fatalf("%s deleted %s that was present at handoff: %v", step, rel, err)
 					}
-					if want, isFile := contents[f]; isFile {
-						got, err := os.ReadFile(f)
-						if err != nil || string(got) != want || !info.Mode().IsRegular() {
-							t.Fatalf("%s changed %s: %q (%v), want %q", step, f, got, err, want)
+					if want == "dir" {
+						if !info.IsDir() {
+							t.Fatalf("%s replaced directory %s", step, rel)
 						}
+						continue
+					}
+					got, err := os.ReadFile(filepath.Join(path, rel))
+					if err != nil || string(got) != want {
+						t.Fatalf("%s changed %s: %q (%v), want %q", step, rel, got, err, want)
 					}
 				}
 			}
@@ -191,12 +220,13 @@ func TestRecoveredHandoffUnknownInventoryDeletesNothingLater(t *testing.T) {
 				t.Fatalf("get: %d %s %s", code, out, stderr)
 			}
 			present("get")
-			if lease.Path == path {
-				if _, stderr, code := runTreehouse(t, repo, home, env, "return", path); code != 0 {
-					t.Fatalf("second return: %d %s", code, stderr)
-				}
-				present("second return")
+			if lease.Path != path {
+				t.Fatalf("get received %s, want the same slot %s", lease.Path, path)
 			}
+			if _, stderr, code := runTreehouse(t, repo, home, env, "return", path); code != 0 {
+				t.Fatalf("second return: %d %s", code, stderr)
+			}
+			present("second return")
 		})
 	}
 }
@@ -222,74 +252,85 @@ func TestRecoveredHandoffDanglingStateReportsReadReason(t *testing.T) {
 	}
 }
 
-// setProcessStartedAt makes this test process stand in for a `return --all`
-// that started at the given instant.
-func setProcessStartedAt(t *testing.T, started time.Time) {
-	t.Helper()
-	saved := processStartedAt
-	processStartedAt = started
-	t.Cleanup(func() { processStartedAt = saved })
-}
+// J1 (Main 2761): a bulk return never releases a lease whose identity changed after
+// the bulk return enumerated it. The handoff changes the identity (lease id and
+// holder) in one locked write, and a bulk release compares the enumerated
+// identity with the stored one under the state lock. Nothing else records the
+// handoff: no time, no sleep, no extra file.
 
-// handoffEntryStamp returns the boundary of the fence the handoff left for the
-// slot's current lease. The fence is a file beside the state file, named for the
-// lease; the state entry itself carries no handoff field.
-func handoffEntryStamp(t *testing.T, state string) time.Time {
+// holdBulkAfterEnumeration starts a real `treehouse return --all` and holds it,
+// after pool.List took its locked read of every entry, at the first git call
+// that is made inside the slot (List's per-slot scan). It returns the run's
+// result channel and a function that lets the run continue. The shim is a shell
+// script, so this needs a POSIX shell.
+func holdBulkAfterEnumeration(t *testing.T, repo, home, root, slot string) (result chan [3]string, release func()) {
 	t.Helper()
-	entry := handoffStateEntry(t, state)
-	for key := range entry {
-		if strings.Contains(key, "handoff") || strings.Contains(key, "handed_off") {
-			t.Fatalf("the state entry carries a handoff field %q: %v", key, entry)
-		}
+	if runtime.GOOS == "windows" {
+		t.Skip("the git shim is a POSIX shell script")
 	}
-	leaseID, _ := entry["lease_id"].(string)
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(state), "treehouse-handoff-"+leaseID+".fence"))
+	realGit, err := exec.LookPath("git")
 	if err != nil {
-		t.Fatalf("handoff left no fence for lease %q: %v", leaseID, err)
+		t.Skip("git not found")
 	}
-	var fence struct {
-		LeaseID  string    `json:"lease_id"`
-		Boundary time.Time `json:"boundary"`
-	}
-	if err := json.Unmarshal(data, &fence); err != nil || fence.LeaseID != leaseID || fence.Boundary.Year() > 3000 {
-		t.Fatalf("handoff fence %s (%v) is not sealed for lease %q", data, err, leaseID)
-	}
-	return fence.Boundary
-}
-
-// J1 on every platform: a `return --all` that started at or before the moment a
-// handoff completed never releases the slot it produced, however late it lists
-// the pool; one that started after releases it as an ordinary lease. The start is
-// the process's own, so this covers a run delayed before it reads any state.
-func TestBulkReturnStartedBeforeHandoffNeverReleasesSlot(t *testing.T) {
-	repo, _, _, path, state := handoffFixture(t)
-	poolDir := filepath.Dir(state)
-	t.Chdir(repo)
-	if _, err := pool.HandoffRecoveredLease(poolDir, path, recoveredHolderLiteral, "real-task"); err != nil {
+	resolved, err := filepath.EvalSymlinks(slot)
+	if err != nil {
 		t.Fatal(err)
 	}
-	stamp := handoffEntryStamp(t, state)
-	for name, started := range map[string]time.Time{"long before": stamp.Add(-time.Hour), "just before": stamp.Add(-time.Nanosecond), "tie": stamp} {
-		setProcessStartedAt(t, started)
-		if err := returnHeldWorktreesIn(poolDir); err != nil {
-			t.Fatalf("%s: bulk return: %v", name, err)
-		}
-		if entry := handoffStateEntry(t, state); entry["leased"] != true || entry["lease_holder"] != "real-task" {
-			t.Fatalf("a bulk return that started %s the handoff completed released the slot: %v", name, entry)
-		}
+	shimDir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$(pwd -P) $*\" in *\"$SHIM_SLOT\"*) if [ ! -e \"$SHIM_DIR/seen\" ]; then : > \"$SHIM_DIR/seen\"; while [ ! -e \"$SHIM_DIR/go\" ]; do sleep 0.05; done; fi;; esac\nexec \"$REAL_GIT\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	setProcessStartedAt(t, stamp.Add(time.Nanosecond))
-	if err := returnHeldWorktreesIn(poolDir); err != nil {
-		t.Fatalf("bulk return after the handoff: %v", err)
+	env := []string{"TREEHOUSE_ROOT=" + root, "SHIM_DIR=" + shimDir, "SHIM_SLOT=" + resolved, "REAL_GIT=" + realGit, "PATH=" + shimDir + string(os.PathListSeparator) + os.Getenv("PATH")}
+	result = make(chan [3]string, 1)
+	go func() {
+		out, stderr, code := runTreehouse(t, repo, home, env, "return", "--all")
+		result <- [3]string{out, stderr, fmt.Sprint(code)}
+	}()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		if _, err := os.Stat(filepath.Join(shimDir, "seen")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the return --all process never reached its scan of the slot")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if entry := handoffStateEntry(t, state); entry["leased"] == true {
-		t.Fatalf("a bulk return that started after the handoff left the ordinary lease held: %v", entry)
+	return result, func() {
+		if err := os.WriteFile(filepath.Join(shimDir, "go"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-// R3-F3: the marker belongs to the lease the handoff minted. A later ordinary
-// acquisition of the same slot, with or without an earlier handoff, is an
-// ordinary lease for every bulk return, whenever that run started.
+// R5-F1 as a real-process regression. The bulk return is held after it enumerated
+// the recovered slot; the handoff completes; the bulk return resumes. The new
+// holder keeps the slot. A bulk return that starts after the handoff completed
+// enumerates the new identity and releases it as an ordinary lease.
+func TestBulkReturnEnumeratedBeforeHandoffNeverReleasesNewHolder(t *testing.T) {
+	repo, home, root, path, state := handoffFixture(t)
+	held, letGo := holdBulkAfterEnumeration(t, repo, home, root, path)
+	if _, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, handoffArgs(path, "real-task")...); code != 0 {
+		t.Fatalf("handoff: %d %s", code, stderr)
+	}
+	letGo()
+	result := <-held
+	entry := handoffStateEntry(t, state)
+	if result[2] != "0" || entry["leased"] != true || entry["lease_holder"] != "real-task" || !strings.Contains(result[1], "Returned 0 of 1") {
+		t.Fatalf("a return --all that enumerated the slot before the handoff released the new holder: code=%s entry=%v\n%s", result[2], entry, result[1])
+	}
+	// The legitimate path: a run that starts after the handoff completed.
+	if _, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, "return", "--all"); code != 0 {
+		t.Fatalf("later return --all: %d %s", code, stderr)
+	}
+	if entry := handoffStateEntry(t, state); entry["leased"] == true {
+		t.Fatalf("a return --all that started after the handoff left the ordinary lease held: %v", entry)
+	}
+}
+
+// A later ordinary acquisition of the same slot, with or without an earlier
+// handoff, is an ordinary lease for a bulk return that enumerates it.
 func TestBulkReturnReleasesLaterAcquisitionOfAHandedOffOrRecoveredSlot(t *testing.T) {
 	for _, handedOff := range []bool{false, true} {
 		name := map[bool]string{false: "no handoff", true: "handoff then named return"}[handedOff]
@@ -310,10 +351,8 @@ func TestBulkReturnReleasesLaterAcquisitionOfAHandedOffOrRecoveredSlot(t *testin
 			if code != 0 || json.Unmarshal([]byte(out), &lease) != nil || lease.Path != path {
 				t.Fatalf("reacquisition: %d %s %s", code, out, stderr)
 			}
-			t.Chdir(repo)
-			setProcessStartedAt(t, time.Unix(1, 0))
-			if err := returnHeldWorktreesIn(poolDir); err != nil {
-				t.Fatalf("bulk return: %v", err)
+			if _, stderr, code := runTreehouse(t, repo, home, env, "return", "--all"); code != 0 {
+				t.Fatalf("bulk return: %d %s", code, stderr)
 			}
 			if entry := handoffStateEntry(t, state); entry["leased"] == true {
 				t.Fatalf("a bulk return skipped an ordinary reacquisition (%s): %v", name, entry)
@@ -322,61 +361,62 @@ func TestBulkReturnReleasesLaterAcquisitionOfAHandedOffOrRecoveredSlot(t *testin
 	}
 }
 
-// R3-F1 with real processes and no sleeps. A git shim holds the real
-// `return --all` in its first repository-discovery step, before it reads any
-// state; the handoff then completes, and only then does the run continue. It
-// started before the handoff completed, so it must leave the slot alone. The
-// shim is a shell script, so this runs where there is a POSIX shell; the
-// in-process test above covers Windows.
-func TestBulkReturnDelayedBeforeFirstReadNeverReleasesSlot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the git shim is a POSIX shell script; TestBulkReturnStartedBeforeHandoffNeverReleasesSlot covers Windows")
-	}
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Skip("git not found")
-	}
+// J3 by construction: a handoff adds no file to the pool root and touches no
+// file in it except the state file, so a full root listing (names, modes, sizes,
+// contents) before and after differs only by that file. A planted file with a
+// fence-like name is left exactly alone.
+func TestRecoveredHandoffPoolRootListing(t *testing.T) {
 	repo, home, root, path, state := handoffFixture(t)
-	shimDir := t.TempDir()
-	script := "#!/bin/sh\nif [ ! -e \"$SHIM_DIR/seen\" ]; then : > \"$SHIM_DIR/seen\"; while [ ! -e \"$SHIM_DIR/go\" ]; do sleep 0.05; done; fi\nexec \"$REAL_GIT\" \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755); err != nil {
+	poolDir := filepath.Dir(state)
+	planted := filepath.Join(poolDir, "treehouse-handoff-my-notes.fence")
+	if err := os.WriteFile(planted, []byte("unrelated work in pool root\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"TREEHOUSE_ROOT=" + root, "SHIM_DIR=" + shimDir, "REAL_GIT=" + realGit, "PATH=" + shimDir + string(os.PathListSeparator) + os.Getenv("PATH")}
-	var bulkStderr string
-	var bulkCode int
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, bulkStderr, bulkCode = runTreehouse(t, repo, home, env, "return", "--all")
-	}()
-	deadline := time.Now().Add(2 * time.Minute)
-	for {
-		if _, err := os.Stat(filepath.Join(shimDir, "seen")); err == nil {
-			break
+	listing := func() map[string]string {
+		t.Helper()
+		entries, err := os.ReadDir(poolDir)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the return --all process never reached its first git call")
+		got := map[string]string{}
+		for _, e := range entries {
+			info, err := e.Info()
+			if err != nil {
+				t.Fatal(err)
+			}
+			desc := fmt.Sprintf("%v", info.Mode())
+			if e.Type().IsRegular() {
+				data, err := os.ReadFile(filepath.Join(poolDir, e.Name()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				desc += fmt.Sprintf(" %x", sha256.Sum256(data))
+			}
+			got[e.Name()] = desc
 		}
-		time.Sleep(20 * time.Millisecond)
+		return got
 	}
+	before := listing()
 	if _, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, handoffArgs(path, "real-task")...); code != 0 {
 		t.Fatalf("handoff: %d %s", code, stderr)
 	}
-	if err := os.WriteFile(filepath.Join(shimDir, "go"), nil, 0o644); err != nil {
-		t.Fatal(err)
+	after := listing()
+	if len(before) != len(after) {
+		t.Fatalf("the handoff changed the set of pool-root entries: %v -> %v", before, after)
 	}
-	<-done
-	entry := handoffStateEntry(t, state)
-	if bulkCode != 0 || entry["leased"] != true || entry["lease_holder"] != "real-task" || !strings.Contains(bulkStderr, "Returned 0 of 1") || !strings.Contains(bulkStderr, "1 skipped") {
-		t.Fatalf("a return --all that started before the handoff released the handed-off slot: code=%d entry=%v\n%s", bulkCode, entry, bulkStderr)
+	for name, desc := range before {
+		if name == "treehouse-state.json" {
+			continue
+		}
+		if after[name] != desc {
+			t.Fatalf("the handoff changed pool-root entry %s: %s -> %s", name, desc, after[name])
+		}
 	}
-	// The same slot, handed off and finished, is ordinary for a run started now.
-	if _, stderr, code := runTreehouse(t, repo, home, []string{"TREEHOUSE_ROOT=" + root}, "return", "--all"); code != 0 {
-		t.Fatalf("later return --all: %d %s", code, stderr)
+	if data, err := os.ReadFile(planted); err != nil || string(data) != "unrelated work in pool root\n" {
+		t.Fatalf("the planted file was changed: %q %v", data, err)
 	}
-	if entry := handoffStateEntry(t, state); entry["leased"] == true {
-		t.Fatalf("a return --all started after the handoff left the ordinary lease held: %v", entry)
+	if after["treehouse-state.json"] == before["treehouse-state.json"] {
+		t.Fatal("the handoff did not write the state file")
 	}
 }
 

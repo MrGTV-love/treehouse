@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -82,10 +81,7 @@ same 'treehouse get' session still hold it, so a slot leased, returned, or hande
 to another 'treehouse get' since the listing is left alone. --all takes no path
 or name, and cannot be combined with the --if-lease-* conditions, which target a
 single lease identity. A slot 'treehouse status' reports as recovered is never
-returned by --all; check it and return it by name. A slot that a recovered-lease
-handoff made an ordinary lease is left alone by every --all run that started
-before the handoff completed, however late that run lists the pool; a run that
-starts after the handoff has completed treats it as an ordinary lease.`,
+returned by --all; check it and return it by name.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed("if-lease-id") && returnIfLeaseID == "" {
 			return fmt.Errorf("--if-lease-id cannot be empty")
@@ -194,8 +190,7 @@ func releaseWorktree(target returnTarget, preconditions pool.ReleasePrecondition
 // return after inspection.
 func bulkReturnPreconditions(wt pool.WorktreeStatus) pool.ReleasePreconditions {
 	observed := wt.Reservation
-	started := processStartedAt
-	return pool.ReleasePreconditions{ExpectedReservation: &observed, RefuseRecovered: true, BulkStartedAt: &started}
+	return pool.ReleasePreconditions{ExpectedReservation: &observed, RefuseRecovered: true}
 }
 
 // returnableStatus reports whether `return --all` acts on a slot in this state.
@@ -261,19 +256,7 @@ func returnHeldWorktrees() error {
 	if err != nil {
 		return err
 	}
-	return returnHeldWorktreesIn(poolDir)
-}
 
-// processStartedAt is when this process began running Go code, captured at
-// package initialization, before any repository discovery. `return --all`
-// carries it into every release so a run that began before a recovered-lease
-// handoff completed never releases the slot that handoff produced, however late
-// the run reaches its listing. The interval between the operating system
-// starting the process and this instant is not observable from here.
-var processStartedAt = time.Now()
-
-// returnHeldWorktreesIn is returnHeldWorktrees for a resolved pool.
-func returnHeldWorktreesIn(poolDir string) error {
 	worktrees, err := pool.List(poolDir)
 	// An unreadable requester identity still leaves a valid listing: its idle
 	// rows are unknown-reuse, which returnableStatus never selects, and the
@@ -322,9 +305,6 @@ func returnHeldWorktreesIn(poolDir string) error {
 		case errors.Is(err, pool.ErrLeasePreconditionFailed):
 			skipped = append(skipped, wt.Name)
 			fmt.Fprintf(os.Stderr, "   %s skipped: it is no longer the acquisition this run listed, so it was left alone (%v).\n", wt.Name, err)
-		case errors.Is(err, pool.ErrHandedOffEntry):
-			skipped = append(skipped, wt.Name)
-			fmt.Fprintf(os.Stderr, "   %s skipped: a recovered-lease handoff completed after this run began, so this run never releases it. Return it by name if you mean to: treehouse return %s\n", wt.Name, quoteReturnPath(wt.Path))
 		case errors.Is(err, pool.ErrRecoveredEntry):
 			skipped = append(skipped, wt.Name)
 			fmt.Fprintf(os.Stderr, "   %s skipped: it was recovered since this run listed it, so it is only returned by name. Check it, then run: treehouse return %s\n", wt.Name, quoteReturnPath(wt.Path))

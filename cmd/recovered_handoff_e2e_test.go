@@ -571,6 +571,17 @@ var lifecycleRaces = []lifecycleRace{
 		},
 	},
 	{
+		name: "destroy-all",
+		args: func(path string) []string {
+			return []string{"destroy", filepath.Dir(filepath.Dir(path)), "--all", "--yes"}
+		},
+		check: func(t *testing.T, path, out, stderr string, code int) {
+			if code != 0 || !strings.Contains(out, "Destroyed 0 worktrees") || !strings.Contains(out, "Skipped 1 worktree") {
+				t.Errorf("racing destroy --all did not skip the leased slot (0 destroyed, 1 skipped, exit 0): %d %s %s", code, out, stderr)
+			}
+		},
+	},
+	{
 		name: "destroy",
 		args: func(path string) []string { return []string{"destroy", path, "--yes"} },
 		check: func(t *testing.T, path, out, stderr string, code int) {
@@ -629,6 +640,22 @@ func TestRecoveredHandoffConcurrentLifecycle(t *testing.T) {
 				}
 				if after := handoffInventory(t, filepath.Dir(path)); !reflect.DeepEqual(before, after) {
 					t.Fatalf("racing %s changed the slot:%s", race.name, handoffInventoryDiff(before, after))
+				}
+				// The slot is still the same one: once the new holder returns it (--force,
+				// because the planted files are untracked), a get receives exactly this slot.
+				env := []string{"TREEHOUSE_ROOT=" + root}
+				if _, stderr, code := runTreehouse(t, repo, home, env, "return", "--force", path); code != 0 {
+					t.Fatalf("return after the race: %d %s", code, stderr)
+				}
+				out, stderr, code := runTreehouse(t, repo, home, env, "get", "--lease", "--json")
+				var lease leaseJSONResult
+				if code != 0 || json.Unmarshal([]byte(out), &lease) != nil {
+					t.Fatalf("get after the race: %d %s %s", code, out, stderr)
+				}
+				// The racing get itself took a second slot, so which of the two a later
+				// get receives is not a property of the handoff.
+				if race.name != "get" && lease.Path != path {
+					t.Fatalf("get after the race received %s, want the same slot %s", lease.Path, path)
 				}
 				t.Logf("iteration=%d %s", iteration, observed)
 			})

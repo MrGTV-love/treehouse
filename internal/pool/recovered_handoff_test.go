@@ -3,6 +3,7 @@ package pool
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,5 +135,61 @@ func TestStateFileEntryExistsDoesNotFollowOrCreate(t *testing.T) {
 	}
 	if _, err := os.Lstat(nowhere); err == nil {
 		t.Fatal("the check created a directory")
+	}
+}
+
+// J1 (Main 2761): a bulk return never releases a lease whose identity changed
+// after it enumerated it. The identity is the lease id together with the holder,
+// compared under the state lock.
+func TestRecoveredHandoffChangesTheEnumeratedIdentity(t *testing.T) {
+	repo, poolDir := setupLocalRepo(t)
+	paths := idleSlots(t, repo, poolDir, 1)
+	quarantine(t, poolDir, "1")
+	state, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enumerated := reservationOf(state.Worktrees[0])
+	if enumerated.LeaseHolder != RecoveredLeaseHolder {
+		t.Fatalf("fixture is not recovered: %+v", enumerated)
+	}
+	if _, err := HandoffRecoveredLease(poolDir, paths[0], RecoveredLeaseHolder, "real-task"); err != nil {
+		t.Fatal(err)
+	}
+	stale := ReleasePreconditions{ExpectedReservation: &enumerated}
+	if err := ValidateReleasePreconditions(poolDir, paths[0], stale, nil); !errors.Is(err, ErrLeasePreconditionFailed) {
+		t.Fatalf("a release by the identity enumerated before the handoff was not refused: %v", err)
+	}
+	after, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := reservationOf(after.Worktrees[0])
+	if current.LeaseID == enumerated.LeaseID || current.LeaseHolder != "real-task" {
+		t.Fatalf("the handoff left the identity %+v, enumerated %+v", current, enumerated)
+	}
+	// A run that enumerates after the handoff holds the new identity and may release.
+	if err := ValidateReleasePreconditions(poolDir, paths[0], ReleasePreconditions{ExpectedReservation: &current}, nil); err != nil {
+		t.Fatalf("a release by the identity enumerated after the handoff was refused: %v", err)
+	}
+}
+
+func TestReservationIdentityIncludesTheHolder(t *testing.T) {
+	repo, poolDir := setupLocalRepo(t)
+	paths := idleSlots(t, repo, poolDir, 1)
+	if _, err := LeaseExisting(poolDir, "1", "first"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := ReadState(poolDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enumerated := reservationOf(state.Worktrees[0])
+	// Same lease id, different holder: not the identity that was enumerated.
+	state.Worktrees[0].LeaseHolder = "someone-else"
+	writeRawState(t, poolDir, state)
+	err = ValidateReleasePreconditions(poolDir, paths[0], ReleasePreconditions{ExpectedReservation: &enumerated}, nil)
+	if !errors.Is(err, ErrLeasePreconditionFailed) {
+		t.Fatalf("a changed holder under the same lease id was not refused: %v", err)
 	}
 }

@@ -921,7 +921,18 @@ func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBounda
 	if os.SameFile(aInfo, bInfo) {
 		return false, fmt.Errorf("seed source shares the slot inode: %s", name)
 	}
+	// Authenticate both files by an identity a write cannot restore (inode or
+	// file id plus change time) before the first read, and again after the last,
+	// so an edit made while the bytes are compared is never lost: any difference
+	// or failed stamp refuses the path. A write after the final comparison and
+	// before Git's own removal remains the documented residual.
+	destinationStamp, err := fileChangeStamp(b)
+	if err != nil {
+		return false, err
+	}
 	var a io.Reader
+	var sourceFile *os.File
+	var sourceStamp, linkTarget string
 	switch {
 	case aInfo.Mode().IsRegular():
 		file, info, err := openRegularSeedFile(parent, base)
@@ -935,6 +946,10 @@ func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBounda
 		if info.Size() != bInfo.Size() {
 			return false, nil
 		}
+		if sourceStamp, err = fileChangeStamp(file); err != nil {
+			return false, err
+		}
+		sourceFile = file
 		a = file
 	case aInfo.Mode()&os.ModeSymlink != 0:
 		target, err := parent.Readlink(base)
@@ -948,9 +963,27 @@ func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBounda
 		if int64(len(target)) != bInfo.Size() {
 			return false, nil
 		}
+		linkTarget = target
 		a = strings.NewReader(target)
 	default:
 		return false, fmt.Errorf("seed source is not a file or symbolic link: %s", name)
+	}
+	unchanged := func() error {
+		if stamp, err := fileChangeStamp(b); err != nil || stamp != destinationStamp {
+			return fmt.Errorf("seed changed while compared: %s", name)
+		}
+		if sourceFile != nil {
+			if stamp, err := fileChangeStamp(sourceFile); err != nil || stamp != sourceStamp {
+				return fmt.Errorf("seed source changed while compared: %s", name)
+			}
+			return nil
+		}
+		target, err := parent.Readlink(base)
+		after, lerr := parent.Lstat(base)
+		if err != nil || lerr != nil || target != linkTarget || !os.SameFile(aInfo, after) {
+			return fmt.Errorf("seed source link changed while compared: %s", name)
+		}
+		return nil
 	}
 	for {
 		nA, errA := io.ReadFull(a, sourceBuffer)
@@ -961,14 +994,28 @@ func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBounda
 		if errB != nil && errB != io.EOF && errB != io.ErrUnexpectedEOF {
 			return false, errB
 		}
+		if seedCompareAfterChunk != nil {
+			seedCompareAfterChunk(name)
+		}
 		if !bytes.Equal(sourceBuffer[:nA], destinationBuffer[:nB]) {
 			return false, nil
 		}
 		if errA != nil || errB != nil {
-			return errA == errB, nil
+			if errA != errB {
+				return false, nil
+			}
+			if err := unchanged(); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
 	}
 }
+
+// seedCompareAfterChunk is a test-only seam, nil in production: it runs after
+// each pair of chunks is read and before they are compared, so a test can make
+// an edit inside an already-read region.
+var seedCompareAfterChunk func(name string)
 
 // RemoveLandedWorktree holds Git's HEAD lock through verification and clean
 // removal. Unlike prune's base-branch check, only live remote refs may protect

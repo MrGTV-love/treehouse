@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/kunchenguid/treehouse/v3/internal/pool"
-	"github.com/kunchenguid/treehouse/v3/internal/ui"
 )
 
 // ignoredFixture is a scratch pool with a manifest-seeded repository. Every
@@ -500,7 +499,9 @@ func TestPruneAllNamesEveryDiscoveredPool(t *testing.T) {
 	for _, args := range [][]string{{"prune", "--all"}, {"prune", "--all", "--yes"}} {
 		out := run(ignoredRepo, args...)
 		for _, p := range []string{leasedPool, ignoredPool} {
-			if !strings.Contains(out, ui.PrettyPath(p)) {
+			// The child printed paths relative to ITS home (the fixture's), not
+			// the parent test process's: accept that spelling or the absolute one.
+			if !strings.Contains(out, childDisplayPath(home, p)) && !strings.Contains(out, p) {
 				t.Errorf("%v does not name pool %s:\n%s", args, p, out)
 			}
 		}
@@ -514,4 +515,16 @@ func TestPruneAllNamesEveryDiscoveredPool(t *testing.T) {
 	if registrations(t, leasedPool) != 1 || registrations(t, ignoredPool) != 1 {
 		t.Errorf("a registration was lost")
 	}
+}
+
+// childDisplayPath formats a path the way the CLI child does (ui.PrettyPath)
+// for the child's own home directory.
+func childDisplayPath(childHome, path string) string {
+	if path == childHome {
+		return "~"
+	}
+	if strings.HasPrefix(path, childHome+string(filepath.Separator)) {
+		return "~" + path[len(childHome):]
+	}
+	return path
 }

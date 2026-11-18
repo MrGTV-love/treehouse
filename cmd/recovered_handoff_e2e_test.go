@@ -60,6 +60,9 @@ type handoffInventoryEntry struct {
 
 // ctime detects transient writes even when a mutant deletes its marker again.
 // Unix exposes nanosecond ctime; Windows' os.FileInfo has no change-time field.
+// Lstat, not DirEntry.Info: on Windows the latter returns the directory
+// listing's cached size and mtime, which NTFS updates lazily after a write, so
+// files written just before the before-inventory could change between scans.
 func handoffInventory(t *testing.T, root string) map[string]handoffInventoryEntry {
 	t.Helper()
 	entries := map[string]handoffInventoryEntry{}
@@ -67,7 +70,7 @@ func handoffInventory(t *testing.T, root string) map[string]handoffInventoryEntr
 		if err != nil {
 			return err
 		}
-		info, err := d.Info()
+		info, err := os.Lstat(path)
 		if err != nil {
 			return err
 		}
@@ -103,6 +106,21 @@ func handoffInventory(t *testing.T, root string) map[string]handoffInventoryEntr
 		t.Fatal(err)
 	}
 	return entries
+}
+
+func handoffInventoryDiff(before, after map[string]handoffInventoryEntry) string {
+	var diff strings.Builder
+	for rel, b := range before {
+		if a, ok := after[rel]; !ok || !reflect.DeepEqual(a, b) {
+			fmt.Fprintf(&diff, "\n  %s: %+v -> %+v (present after: %v)", rel, b, a, ok)
+		}
+	}
+	for rel, a := range after {
+		if _, ok := before[rel]; !ok {
+			fmt.Fprintf(&diff, "\n  %s: added %+v", rel, a)
+		}
+	}
+	return diff.String()
 }
 
 func handoffGitSnapshot(t *testing.T, path string) []string {
@@ -160,10 +178,10 @@ func TestRecoveredHandoffPreservesLiveCopy(t *testing.T) {
 		t.Fatalf("handoff identity: %+v", lease)
 	}
 	if after := handoffInventory(t, filepath.Dir(path)); !reflect.DeepEqual(before, after) {
-		t.Fatal("handoff touched the slot inventory (including nanosecond change times)")
+		t.Fatalf("handoff touched the slot inventory (including nanosecond change times):%s", handoffInventoryDiff(before, after))
 	}
 	if after := handoffInventory(t, outerGitDir); !reflect.DeepEqual(metadataBefore, after) {
-		t.Fatal("handoff touched the outer linked worktree git directory")
+		t.Fatalf("handoff touched the outer linked worktree git directory:%s", handoffInventoryDiff(metadataBefore, after))
 	}
 	if after := handoffGitSnapshot(t, nested); !reflect.DeepEqual(gitBefore, after) {
 		t.Fatalf("nested git state changed: %v -> %v", gitBefore, after)
@@ -343,7 +361,7 @@ func TestRecoveredHandoffRefusals(t *testing.T) {
 				t.Fatalf("refusal changed state: %v", err)
 			}
 			if after := handoffInventory(t, filepath.Dir(path)); !reflect.DeepEqual(before, after) {
-				t.Fatal("refusal changed slot inventory")
+				t.Fatalf("refusal changed slot inventory:%s", handoffInventoryDiff(before, after))
 			}
 		})
 	}

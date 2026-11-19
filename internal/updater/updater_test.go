@@ -836,6 +836,7 @@ func TestDetachedWorkingDirAcceptsATempDirOutsideAnyWorktree(t *testing.T) {
 	// testing.TempDir also honors GOTMPDIR independently of os.TempDir.
 	for _, name := range []string{"GOTMPDIR", "TMPDIR", "TMP", "TEMP"} {
 		t.Setenv(name, "")
+		os.Unsetenv(name)
 	}
 	base := t.TempDir()
 	if root, err := enclosingWorktreeRoot(resolved(t, base)); err != nil || root != "" {

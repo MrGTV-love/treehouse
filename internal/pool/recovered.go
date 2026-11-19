@@ -1,15 +1,137 @@
 package pool
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
+
+	"github.com/kunchenguid/treehouse/v3/internal/pathidentity"
 )
+
+// HandoffRecoveredLease replaces a recovered holder in place. It does not run
+// recovery or healing: the caller must first inspect a persisted quarantine and
+// verify who owns its contents. The exact path and expected holder are checked
+// again under the state lock. No worktree operation or intermediate release is
+// performed, and every refusal leaves the state file untouched.
+func HandoffRecoveredLease(poolDir, path, expectedHolder, holder string) (LeaseInfo, error) {
+	if strings.TrimSpace(holder) == "" {
+		return LeaseInfo{}, fmt.Errorf("recovered handoff requires a non-empty lease holder")
+	}
+	if holder == RecoveredLeaseHolder {
+		return LeaseInfo{}, fmt.Errorf("new lease holder must not be the recovered holder")
+	}
+	if strings.ContainsFunc(holder, unicode.IsControl) {
+		return LeaseInfo{}, fmt.Errorf("lease holder must not contain control characters")
+	}
+	if expectedHolder != RecoveredLeaseHolder {
+		return LeaseInfo{}, fmt.Errorf("lease holder does not match the required recovered holder")
+	}
+
+	var lease LeaseInfo
+	err := WithStateLock(poolDir, func() error {
+		// ReadState intentionally recovers corrupt JSON and unauthenticated
+		// entries. A handoff must instead refuse those inputs, not manufacture
+		// the precondition it was asked to compare.
+		data, err := os.ReadFile(stateFilePath(poolDir))
+		if err != nil {
+			return fmt.Errorf("reading handoff state: %w", err)
+		}
+		var state State
+		if err := json.Unmarshal(data, &state); err != nil {
+			return fmt.Errorf("invalid handoff state; inspect with treehouse status first: %w", err)
+		}
+		if state.Version != stateVersion {
+			return fmt.Errorf("handoff requires state version %d; inspect with treehouse status first", stateVersion)
+		}
+		key, err := readStateKey(poolDir)
+		if err != nil {
+			return fmt.Errorf("reading handoff state key: %w", err)
+		}
+		for _, wt := range state.Worktrees {
+			if wt.SeedInventoryKnown && !validSeedInventoryDigest(key, wt) {
+				return fmt.Errorf("invalid state inventory for worktree %s; inspect with treehouse status first", wt.Name)
+			}
+		}
+		resolved, err := pathidentity.Existing(path)
+		if err != nil {
+			return fmt.Errorf("worktree %s is not managed by treehouse: %w", path, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return err
+		}
+		entryCount := len(state.Worktrees)
+		state, index, err := normalizeStatePaths(state)
+		if err != nil {
+			return err
+		}
+		if len(state.Worktrees) != entryCount {
+			return fmt.Errorf("handoff state contains duplicate worktree aliases; inspect with treehouse status first")
+		}
+		i, ok := index.find(resolved, info)
+		if !ok {
+			return fmt.Errorf("worktree %s is not managed by treehouse", path)
+		}
+		wt := &state.Worktrees[i]
+		if wt.Destroying {
+			return fmt.Errorf("worktree %s is being destroyed", wt.Name)
+		}
+		if !wt.Leased || wt.LeaseHolder != RecoveredLeaseHolder {
+			return fmt.Errorf("worktree %s is not a recovered lease (holder: %q)", wt.Name, wt.LeaseHolder)
+		}
+		if wt.LeaseHolder != expectedHolder {
+			return fmt.Errorf("lease holder does not match for worktree %s", wt.Name)
+		}
+		if err := markAcquired(wt, acquireOptions{lease: true, leaseHolder: holder}); err != nil {
+			return err
+		}
+		wt.RecoveryReason = ""
+		// Recovery cannot reconstruct the old seed inventory. Trust an empty
+		// cleanup list, not any of the unknown files in the live copy. They stay
+		// on disk, including when this ordinary lease is eventually returned.
+		if !wt.SeedInventoryKnown {
+			setSeedInventory(wt, nil, true)
+		}
+		// One replacement of the entry changes the lease identity (a new lease id
+		// and the new holder). A bulk return releases a slot only if the identity it
+		// enumerated is still the stored one, checked under this same lock, so one
+		// that enumerated the recovered entry cannot release the new holder. There
+		// is no other record of the handoff.
+		if err := WriteState(poolDir, state); err != nil {
+			return err
+		}
+		lease = leaseInfoFromEntry(*wt, wt.BaseBranch)
+		return nil
+	})
+	return lease, err
+}
+
+// StateFileEntryExists reports whether the pool state file has a directory entry,
+// without following it. A dangling symlink is an entry that cannot be read, so it
+// counts as present and the caller reports the read error; only an absent entry
+// means "not a pool". It has no side effect, unlike taking the state lock.
+func StateFileEntryExists(poolDir string) (bool, error) {
+	_, err := os.Lstat(stateFilePath(poolDir))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
 
 // A recovered entry (see RecoveredLeaseHolder) is a persistent quarantine:
 // nothing in this package frees it, moves its contents, or clears its lease
-// except an explicit return naming its slot. What remains here only REPORTS
-// the retained backup folders that the automatic recovery of earlier treehouse
-// versions moved untracked files into.
+// except an explicit return naming its slot. HandoffRecoveredLease can instead
+// acknowledge a verified holder without clearing the lease or touching the slot.
+// The helpers below only REPORT retained backup folders that automatic recovery
+// in earlier treehouse versions moved untracked files into.
 
 // recoveryBackupDir is the one backup folder that the automatic recovery of
 // earlier treehouse versions used for a slot. It is derived rather than recorded.

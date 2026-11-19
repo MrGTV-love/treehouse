@@ -91,11 +91,14 @@ type WorktreeStatus struct {
 }
 
 // Reservation is the persisted claim on one slot at one instant: its durable
-// lease and its short-lived owner. The owner pair identifies a process the way
-// ownerAlive does, because a PID alone can be reused by an unrelated process.
+// lease (the lease id together with the holder, which is the lease identity a
+// recovered-lease handoff changes in one write) and its short-lived owner. The
+// owner pair identifies a process the way ownerAlive does, because a PID alone
+// can be reused by an unrelated process.
 type Reservation struct {
 	Leased         bool
 	LeaseID        string
+	LeaseHolder    string
 	OwnerPID       int32
 	OwnerStartedAt int64
 }
@@ -104,6 +107,7 @@ func reservationOf(wt WorktreeEntry) Reservation {
 	return Reservation{
 		Leased:         wt.Leased,
 		LeaseID:        wt.LeaseID,
+		LeaseHolder:    wt.LeaseHolder,
 		OwnerPID:       wt.OwnerPID,
 		OwnerStartedAt: wt.OwnerStartedAt,
 	}

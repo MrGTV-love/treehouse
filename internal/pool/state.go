@@ -367,7 +367,8 @@ func recoverMissingStateEntries(poolDir string, s State) (State, error) {
 // also put it on every entry of valid pre-3.0 state. None of these can be told
 // apart, so all stay leased: a persistent quarantine that no command frees as a
 // side effect of another. Only a `return` naming the slot releases one; bulk
-// `return --all` leaves them alone.
+// `return --all` leaves them alone. HandoffRecoveredLease can explicitly
+// acknowledge a verified holder without releasing the slot.
 const RecoveredLeaseHolder = "recovered: state file was corrupt or truncated; verify before reuse"
 
 // quarantineEntry builds the conservative entry both recovery scans write for a

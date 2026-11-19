@@ -49,6 +49,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("TREEHOUSE_HANDOFF_OBSERVER") != "" {
+		os.Exit(m.Run())
+	}
 	buildDir, err := os.MkdirTemp("", "treehouse-e2e-*")
 	if err != nil {
 		panic(err)

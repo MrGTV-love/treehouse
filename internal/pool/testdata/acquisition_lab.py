@@ -628,7 +628,7 @@ def incremental_progress(foreign=False):
     if ARGS.base:
         assert rows == [], rows
     else:
-        identity = str(alias).replace('\\', '\\\\').replace('\r', '\\r').replace('\n', '\\n')
+        identity = str(alias).replace('\r', '\\r').replace('\n', '\\n')
         assert len(rows) == 2 and rows[0][0] == identity and rows[0][1] == 'refused' and 'dirty' in rows[0][2], ('TG8 unescaped copy newline', rows)
         assert rows[1][0] == escaped.paths[1] and rows[1][1] == 'accepted', rows
     assert (Path(escaped.paths[0])/'README').read_text() == 'keep recognizable dirty data\n'

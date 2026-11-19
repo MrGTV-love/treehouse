@@ -63,7 +63,7 @@ func (c *acquisitionClaim) close() {
 // Callers omit empty-pool creation, which checks no candidate. Every candidate
 // completion is reported immediately, once per path. Fixed reasons never
 // include Git output or checkout contents.
-var candidateProgressPathEscaper = strings.NewReplacer("\\", "\\\\", "\r", "\\r", "\n", "\\n")
+var candidateProgressPathEscaper = strings.NewReplacer("\r", "\\r", "\n", "\\n")
 
 func newCandidateProgress(writer io.Writer) func(string, string, string) {
 	if writer == nil {

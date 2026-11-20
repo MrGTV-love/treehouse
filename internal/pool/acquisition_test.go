@@ -206,7 +206,7 @@ func TestAcquireForeignSelectionSnapshotOutsidePoolLock(t *testing.T) {
 }
 
 func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
-	for _, risk := range []string{"process", "snapshot-error"} {
+	for _, risk := range []string{"process", "process-gone", "snapshot-error"} {
 		t.Run(risk, func(t *testing.T) {
 			foreign, caller, pool := setupSharedClonePool(t)
 			path, err := Acquire(foreign, pool, 1, nil)
@@ -218,7 +218,7 @@ func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
 			}
 			var snapshot process.WorktreeSnapshot
 			var snapshotErr error
-			if risk == "process" {
+			if risk != "snapshot-error" {
 				tenant := exec.Command(os.Args[0], "-test.run=^TestAcquireTenantHelper$")
 				tenant.Env = append(os.Environ(), "TREEHOUSE_TENANT_HELPER=1")
 				tenant.Dir = path
@@ -250,12 +250,12 @@ func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
 				if err != nil || !found {
 					t.Fatalf("selection snapshot did not capture the fixture tenant: %#v %v", matches, err)
 				}
-				// Make the final scan empty in reality too. Refusal must come from
-				// the selection evidence, not from the final-scan fallback.
-				if err := tenant.Process.Kill(); err != nil {
-					t.Fatal(err)
+				if risk == "process-gone" {
+					if err := tenant.Process.Kill(); err != nil {
+						t.Fatal(err)
+					}
+					_ = tenant.Wait()
 				}
-				_ = tenant.Wait()
 			} else {
 				snapshotErr = fmt.Errorf("fixture process snapshot unavailable")
 			}
@@ -276,9 +276,9 @@ func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
 				foreignSelections++
 				return snapshot, snapshotErr
 			}
-			findProcessesInWorktree = func(string) ([]process.ProcessInfo, error) {
+			findProcessesInWorktree = func(path string) ([]process.ProcessInfo, error) {
 				finals++
-				return nil, nil
+				return oldFinal(path)
 			}
 			t.Cleanup(func() {
 				snapshotWorktreeProcesses = oldSnapshot
@@ -286,10 +286,27 @@ func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
 				acquisitionStage = oldStage
 			})
 			got, err := AcquireLeaseInfoWithOptions(caller, pool, 1, nil, "selection risk", AcquireOptions{SkipFetch: true})
+			if risk == "process-gone" {
+				if err != nil || got.Path == "" {
+					t.Fatalf("a snapshot hit that left before the fresh re-check was refused: %#v %v", got, err)
+				}
+				assertCloneCommonDir(t, got.Path, caller)
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("reclaimed foreign checkout still present: %v", err)
+				}
+				if ownSelections != 1 || foreignSelections != 1 || finals != 2 {
+					t.Fatalf("stale snapshot hit was not rechecked once before the removal guard: own=%d foreign=%d scans=%d", ownSelections, foreignSelections, finals)
+				}
+				return
+			}
+			wantFinals := 0
+			if risk == "process" {
+				wantFinals = 1
+			}
 			if err == nil || got.Path != "" {
 				t.Fatalf("foreign selection risk was allocated: %#v %v", got, err)
 			}
-			if ownSelections != 1 || foreignSelections != 1 || finals != 0 {
+			if ownSelections != 1 || foreignSelections != 1 || finals != wantFinals {
 				t.Fatalf("foreign selection refusal fell through: own=%d foreign=%d final scans=%d", ownSelections, foreignSelections, finals)
 			}
 			assertFileContents(t, filepath.Join(path, "README.md"), "hi\n")

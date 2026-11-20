@@ -16,7 +16,7 @@ PARSER = argparse.ArgumentParser()
 PARSER.add_argument('binary')
 PARSER.add_argument('--base', action='store_true')
 PARSER.add_argument('--evidence')
-PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress','independent-below','first-copy','second-pass','return-fenced'], default='all')
+PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress','independent-below','first-copy','second-pass','return-fenced','stale-view'], default='all')
 ARGS = PARSER.parse_args()
 BINARY = str(Path(ARGS.binary).resolve())
 REAL_GIT = shutil.which('git')
@@ -49,24 +49,31 @@ if 'ls-tree' in args and '-r' in args:
  event['tree']=result.stdout.strip()
 with open(os.environ['LAB_LOG'],'a') as log: log.write(json.dumps(event)+'\n')
 if os.environ.get('LAB_FAIL_TREE') and event.get('tree')==os.environ['LAB_FAIL_TREE']: sys.exit(1)
-kind=os.environ.get('LAB_HOLD',''); target=os.environ.get('LAB_TARGET','')
-match=(kind=='selection' and cwd==target and 'status' in args or
+def hit(kind,target):
+ return (kind in ('selection','selection-stay') and cwd==target and 'status' in args or
        kind=='reset' and cwd==target and 'read-tree' in args or
        kind=='foreign-selection' and cwd==target and 'ls-files' in args and '-v' in args or
        kind=='foreign-remove' and 'worktree' in args and 'remove' in args and target in args or
+       kind=='fresh-add' and 'worktree' in args and 'add' in args or
        kind=='preclaim' and '--git-common-dir' in args and (cwd==target or '--git-dir='+os.path.join(target,'.git') in args) or
        kind in ('progress','progress-foreign') and cwd in json.loads(os.environ['LAB_PROGRESS_PATHS']) and
        ('status' in args if kind=='progress' else 'ls-files' in args and '-v' in args))
+kind=os.environ.get('LAB_HOLD',''); target=os.environ.get('LAB_TARGET','')
+match=hit(kind,target); tag=''
+if not match and hit(os.environ.get('LAB_HOLD2',''),os.environ.get('LAB_TARGET2','')):
+ match=True; kind=os.environ['LAB_HOLD2']; tag='-2'
 if match:
- marker=os.path.join(root,'held-'+run+('-'+os.path.basename(os.path.dirname(cwd)) if kind.startswith('progress') else ''))
+ marker=os.path.join(root,'held-'+run+tag+('-'+os.path.basename(os.path.dirname(cwd)) if kind.startswith('progress') else ''))
  try:
   fd=os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY); os.close(fd)
  except FileExistsError: pass
  else:
   # A shim awaiting the controller is not a tenant of the candidate checkout,
   # except a preclaim hold: its working directory is exactly what is tested.
-  if kind!='preclaim': os.chdir(root)
-  s=socket.socket(socket.AF_UNIX); os.chdir(os.path.dirname(os.environ['LAB_SOCKET'])); s.connect(os.path.basename(os.environ['LAB_SOCKET'])); os.chdir(cwd if kind=='preclaim' else root); s.sendall(b'H'); s.recv(1); s.close()
+  # A selection-stay hold is a git process that stays inside the candidate.
+  stay=kind in ('preclaim','selection-stay')
+  if not stay: os.chdir(root)
+  s=socket.socket(socket.AF_UNIX); os.chdir(os.path.dirname(os.environ['LAB_SOCKET'])); s.connect(os.path.basename(os.environ['LAB_SOCKET'])); os.chdir(cwd if stay else root); s.sendall(b'H'); s.recv(1); s.close()
   os.chdir(cwd)
 if os.environ.get('LAB_DELAY'): time.sleep(float(os.environ['LAB_DELAY']))
 os.execv(os.environ['LAB_REAL_GIT'],[os.environ['LAB_REAL_GIT']]+args)
@@ -134,9 +141,9 @@ class Fixture:
         return subprocess.run([BINARY, *args], cwd=self.caller, env=self.env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
 
-    def start(self, label, hold='', path='', **environment):
+    def start(self, label, hold='', path='', cwd=None, **environment):
         return subprocess.Popen([BINARY, 'get', '--lease', '--no-fetch', '--lease-holder', label],
-                                cwd=self.caller, env=dict(self.env, LAB_ID=label, LAB_HOLD=hold, LAB_TARGET=path, **environment),
+                                cwd=cwd or self.caller, env=dict(self.env, LAB_ID=label, LAB_HOLD=hold, LAB_TARGET=path, **environment),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def finish(self, proc):
@@ -407,6 +414,111 @@ def fenced_return():
         server.close()
         if first.poll() is None: first.kill()
         first.communicate()
+
+
+def stale_view(foreign=False, held=False, alive=False):
+    # Get C claims X and keeps its git inside X while get A reads state and
+    # takes its process snapshot. X is dirty only while C screens it, so C
+    # alone refuses it. A reaches X only after an earlier candidate W, so both
+    # of A's walk-start views of X are stale unless C still holds X.
+    f = Fixture(2, foreign=foreign)
+    w, x = f.paths
+    readme = Path(x)/'README'
+    original = readme.read_text()
+    (Path(w)/'notes').write_text('keep refused candidate\n')
+    for config in {f.caller, f.repo}:
+        (config/'treehouse.toml').write_text('max_trees = 3\n')
+    server = socket.socket(socket.AF_UNIX)
+    bind_server(server, f)
+    processes, connections = {}, {}
+
+    def gate(name):
+        connection, _ = server.accept()
+        assert connection.recv(1) == b'H', name
+        connections[name] = connection
+
+    def release(name):
+        connection = connections.pop(name)
+        connection.sendall(b'R'); connection.close()
+
+    def finish(label):
+        out, err = processes[label].communicate()
+        return processes[label].returncode, out, err
+
+    walk = 'foreign' if foreign else 'primary'
+    variant = 'held' if held else ('alive' if alive else 'exited')
+    try:
+        if foreign:
+            processes['A'] = f.start('A', 'preclaim', x, LAB_HOLD2='foreign-selection', LAB_TARGET2=w)
+            gate('A')
+            filler = f.command('get', '--lease', '--no-fetch')
+            assert filler.returncode == 0 and filler.stdout == str(f.pool/'3'/'repo')+'\n', (filler.stdout, filler.stderr)
+            processes['C'] = f.start('C', 'selection-stay', x, cwd=f.repo)
+            gate('C')
+            release('A')
+            gate('A2')
+        else:
+            processes['C'] = f.start('C', 'selection-stay', x, LAB_HOLD2='fresh-add')
+            gate('C')
+            processes['A'] = f.start('A', 'preclaim', w)
+            gate('A2')
+        owner = {entry['path']: entry for entry in f.state()}[x]
+        assert owner.get('owner_pid') == processes['C'].pid, ('C does not hold X while A is parked', owner)
+        readme.write_text('seen dirty only by C\n')
+        if held:
+            release('A2')
+            code, out, err = finish('A')
+            assert out.strip() != x, ('a slot still held at the re-check was handed out', walk, out, err)
+            if foreign:
+                assert code != 0 and 'all 3 worktrees are in use' in err, (walk, code, out, err)
+            else:
+                assert code == 0 and out == str(f.pool/'3'/'repo')+'\n', (walk, code, out, err)
+            if not foreign:
+                rows = {row[0]: row for row in progress_rows(err)}
+                assert rows[x][1] == 'refused' and 'owner' in rows[x][2], ('held X refusal reason', rows)
+            assert {entry['path']: entry for entry in f.state()}[x].get('owner_pid') == processes['C'].pid
+            assert readme.read_text() == 'seen dirty only by C\n'
+            release('C')
+            finish('C')
+        else:
+            release('C')
+            if foreign:
+                code, out, err = finish('C')
+                assert code != 0 and 'all 3 worktrees are in use' in err, ('C must refuse at the cap', code, out, err)
+            else:
+                gate('C2')
+            readme.write_text(original)
+            if not foreign:
+                if not alive:
+                    release('C2')
+                    code, out, err = finish('C')
+                    assert code == 0 and out == str(f.pool/'3'/'repo')+'\n', (code, out, err)
+            release('A2')
+            code, out, err = finish('A')
+            expected = str(f.pool/'4'/'repo') if foreign else x
+            assert code == 0 and out == expected+'\n', ('stale walk view refused a free slot', walk, variant, code, out, err)
+            assert 'worktrees are in use' not in err, err
+            if foreign:
+                assert not Path(x).exists(), 'free foreign X was not reclaimed'
+            else:
+                rows = {row[0]: row for row in progress_rows(err)}
+                assert rows[x][1] == 'accepted', ('free X was not accepted', rows)
+                entry = {entry['path']: entry for entry in f.state()}[x]
+                assert entry.get('leased') and entry.get('lease_holder') == 'A', entry
+            if alive:
+                assert processes['C'].poll() is None, 'C exited before A finished'
+                release('C2')
+                code, out, err = finish('C')
+                assert code == 0 and out == str(f.pool/'3'/'repo')+'\n', (code, out, err)
+        assert (Path(w)/'notes').read_text() == 'keep refused candidate\n'
+        record('TG2 stale walk view '+walk+' '+variant+': X '+('refused while still held' if held else 'claimed after C released it')+'; fixture='+str(f.root))
+    finally:
+        for connection in connections.values():
+            connection.sendall(b'R'); connection.close()
+        server.close()
+        for proc in processes.values():
+            if proc.poll() is None: proc.kill()
+            proc.communicate()
 
 
 def candidate_path(event, paths):
@@ -731,6 +843,11 @@ try:
         second_pass()
         second_pass(guarded=True)
     if ARGS.only in ['all','return-fenced'] and not ARGS.base: fenced_return()
+    if ARGS.only in ['all','stale-view'] and not ARGS.base:
+        for foreign in (False, True):
+            stale_view(foreign)
+            stale_view(foreign, held=True)
+        stale_view(alive=True)
     if ARGS.only in ['all','cache-failure']: failed_tree()
 finally:
     SOCKET_ROOT.cleanup()

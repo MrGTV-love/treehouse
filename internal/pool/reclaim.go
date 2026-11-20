@@ -20,6 +20,14 @@ func reclaimForeignWorktree(repoRoot, poolDir string, poolSize, firstSlot int, s
 	var fresh *acquisitionClaim
 	for _, index := range candidates {
 		wt := snapshot.Worktrees[index]
+		if wt.OwnerPID != 0 && !wt.Destroying && !wt.Leased {
+			current, err := currentCandidate(poolDir, wt)
+			if err != nil {
+				report(wt.Path, "refused", "foreign reservation could not be read")
+				return refusals, nil, err
+			}
+			wt = current
+		}
 		reported := false
 		skip := func(reason, summary string) {
 			refusals = append(refusals, fmt.Sprintf("worktree %s: %s", wt.Name, reason))
@@ -75,6 +83,8 @@ func reclaimForeignWorktree(repoRoot, poolDir string, poolSize, firstSlot int, s
 			processes, err := selection.InWorktree(wt.Path)
 			if scanErr != nil {
 				err = scanErr
+			} else if err == nil && len(processes) != 0 {
+				processes, err = findProcessesInWorktree(wt.Path)
 			}
 			if err != nil {
 				skip(fmt.Sprintf("process table cannot be read: %v", err), "process snapshot unavailable")

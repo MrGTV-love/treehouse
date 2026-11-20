@@ -257,6 +257,29 @@ func (c *acquisitionClaim) replaceWithFresh(repoRoot string, poolSize, firstSlot
 	return claim, err
 }
 
+// currentCandidate rereads, once, a slot whose walk record carried an owner
+// reservation. The record is replaced only while the slot fence is free under
+// the same state lock; claimCandidate still confirms it before screening.
+func currentCandidate(poolDir string, observed WorktreeEntry) (WorktreeEntry, error) {
+	current := observed
+	err := WithStateLock(poolDir, func() error {
+		state, err := ReadState(poolDir)
+		if err != nil {
+			return err
+		}
+		for _, wt := range state.Worktrees {
+			if wt.Name == observed.Name && samePath(wt.Path, observed.Path) {
+				if slotWritable(poolDir, wt.Name) == nil {
+					current = wt
+				}
+				return nil
+			}
+		}
+		return nil
+	})
+	return current, err
+}
+
 func claimCandidate(poolDir string, observed WorktreeEntry) (*acquisitionClaim, error) {
 	var claim *acquisitionClaim
 	err := WithStateLock(poolDir, func() error {

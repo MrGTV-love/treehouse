@@ -565,6 +565,15 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		return true
 	}
 	for candidateIndex, wt := range snapshot.Worktrees {
+		if wt.OwnerPID != 0 && !wt.Destroying && !wt.Leased {
+			current, err := currentCandidate(poolDir, wt)
+			if err != nil {
+				report(wt.Path, "refused", "reservation could not be read")
+				return LeaseInfo{}, err
+			}
+			wt = current
+			snapshot.Worktrees[candidateIndex] = current
+		}
 		if wt.Destroying {
 			report(wt.Path, "refused", "destruction in progress")
 			continue
@@ -642,6 +651,9 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 				return reject("process snapshot unavailable")
 			}
 			processes, err := selection.InWorktree(wt.Path)
+			if err == nil && len(processes) != 0 {
+				processes, err = findProcessesInWorktree(wt.Path)
+			}
 			if err != nil {
 				return reject("worktree process lookup failed")
 			}

@@ -565,25 +565,12 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		return true
 	}
 	for candidateIndex, wt := range snapshot.Worktrees {
-		if wt.OwnerPID != 0 && !wt.Destroying && !wt.Leased {
-			current, err := currentCandidate(poolDir, wt)
-			if err != nil {
-				report(wt.Path, "refused", "reservation could not be read")
-				return LeaseInfo{}, err
-			}
-			wt = current
-			snapshot.Worktrees[candidateIndex] = current
-		}
 		if wt.Destroying {
 			report(wt.Path, "refused", "destruction in progress")
 			continue
 		}
 		if wt.Leased {
 			report(wt.Path, "refused", "durably leased")
-			continue
-		}
-		if ownerAlive(wt) {
-			report(wt.Path, "refused", "live owner reservation")
 			continue
 		}
 		flavor := vcs.WorktreeBackendName(wt.Path)
@@ -619,6 +606,26 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 				report(wt.Path, "refused", "other clone")
 			}
 			continue
+		}
+		if wt.OwnerPID != 0 {
+			current, err := currentCandidate(poolDir, wt)
+			if err != nil {
+				report(wt.Path, "refused", "reservation could not be read")
+				return LeaseInfo{}, err
+			}
+			wt = current
+			if wt.Destroying {
+				report(wt.Path, "refused", "destruction in progress")
+				continue
+			}
+			if wt.Leased {
+				report(wt.Path, "refused", "durably leased")
+				continue
+			}
+			if ownerAlive(wt) {
+				report(wt.Path, "refused", "live owner reservation")
+				continue
+			}
 		}
 		claim, err := claimCandidate(poolDir, wt)
 		if err != nil {

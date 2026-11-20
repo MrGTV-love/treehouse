@@ -319,6 +319,68 @@ func TestAcquireForeignSelectionRefusesSnapshotRisks(t *testing.T) {
 	}
 }
 
+func TestAcquireForeignLiveOwnerReachesReclamation(t *testing.T) {
+	// At the cap: get C screens its own slot X and holds X's fence while get A
+	// reads state and walks past X. C releases X while A screens an own-clone
+	// copy Z. A must still reclaim the idle, removable X.
+	foreign, caller, pool := setupSharedClonePool(t)
+	x, err := Acquire(foreign, pool, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(pool, x); err != nil {
+		t.Fatal(err)
+	}
+	z, err := Acquire(caller, pool, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(pool, z); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(z, "notes"), []byte("keep refused own work\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	state, err := ReadState(pool)
+	if err != nil || len(state.Worktrees) != 2 {
+		t.Fatalf("fixture state: %#v %v", state, err)
+	}
+	idle := state.Worktrees[0]
+	if !samePath(idle.Path, x) {
+		t.Fatalf("fixture order: %q is not X %q", idle.Path, x)
+	}
+	held, err := claimCandidate(pool, idle)
+	if err != nil || held == nil {
+		t.Fatalf("C could not claim X: %v", err)
+	}
+	t.Cleanup(held.close)
+	released := false
+	oldStage := acquisitionStage
+	acquisitionStage = func(stage, path string) {
+		if stage == "screening" && samePath(path, z) && !released {
+			released = true
+			if err := held.save(State{Worktrees: []WorktreeEntry{idle}}); err != nil {
+				t.Errorf("C release: %v", err)
+			}
+			held.close()
+		}
+		oldStage(stage, path)
+	}
+	t.Cleanup(func() { acquisitionStage = oldStage })
+	got, err := AcquireLeaseInfoWithOptions(caller, pool, 2, nil, "A", AcquireOptions{SkipFetch: true})
+	if !released {
+		t.Fatalf("A never screened own-clone copy Z: %#v %v", got, err)
+	}
+	if err != nil || got.Path == "" {
+		t.Fatalf("idle removable foreign X was dropped before reclamation: %#v %v", got, err)
+	}
+	assertCloneCommonDir(t, got.Path, caller)
+	if _, err := os.Stat(x); !os.IsNotExist(err) {
+		t.Fatalf("foreign X was not reclaimed: %v", err)
+	}
+	assertFileContents(t, filepath.Join(z, "notes"), "keep refused own work\n")
+}
+
 func TestAcquireFenceProtectsLastComparisonThroughReset(t *testing.T) {
 	for _, stage := range []string{"claimed", "reset"} {
 		t.Run(stage, func(t *testing.T) {

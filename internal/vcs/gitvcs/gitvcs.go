@@ -92,6 +92,24 @@ func CommonGitDir(dir string) (string, error) {
 	return p, nil
 }
 
+// WorktreeCommonGitDir returns CommonGitDir for a checkout root that holds a
+// .git marker, without starting git inside that checkout: git reads the
+// marker through --git-dir from the caller's own working directory. A
+// concurrent get's process snapshot therefore never sees this query as a
+// tenant of a copy it has not fenced.
+func WorktreeCommonGitDir(worktreePath string) (string, error) {
+	gitDir := "--git-dir=" + filepath.Join(worktreePath, ".git")
+	out, err := runGit("", gitDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		// Older git without --path-format prints a path relative to our cwd.
+		out, err = runGit("", gitDir, "rev-parse", "--git-common-dir")
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Abs(filepath.FromSlash(out))
+}
+
 func repoRootFromCommonGitDir(dir string) (string, bool) {
 	cleaned := filepath.Clean(filepath.FromSlash(dir))
 	if filepath.Base(cleaned) != ".git" {
@@ -1682,6 +1700,10 @@ func IsHeadMergedIntoDefault(repoRoot, worktreePath string) (bool, string, error
 // detects a squash merge without treating unrelated target-branch changes as a
 // mismatch.
 func IsHeadMergedIntoRef(worktreePath, ref string) (bool, error) {
+	return headMergedWithReader(worktreePath, ref, readTree)
+}
+
+func headMergedWithReader(worktreePath, ref string, reader func(string, string) (map[string]string, error)) (bool, error) {
 	cmd := exec.Command("git", "merge-base", "--is-ancestor", "HEAD", ref)
 	cmd.Dir = worktreePath
 	out, err := cmd.CombinedOutput()
@@ -1689,12 +1711,12 @@ func IsHeadMergedIntoRef(worktreePath, ref string) (bool, error) {
 		return true, nil
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-		return isHeadContentMergedIntoRef(worktreePath, ref)
+		return headContentMergedWithReader(worktreePath, ref, reader)
 	}
 	return false, fmt.Errorf("git merge-base --is-ancestor HEAD %s: %s", ref, strings.TrimSpace(string(out)))
 }
 
-func isHeadContentMergedIntoRef(worktreePath, ref string) (bool, error) {
+func headContentMergedWithReader(worktreePath, ref string, readTree func(string, string) (map[string]string, error)) (bool, error) {
 	cmd := exec.Command("git", "merge-base", "HEAD", ref)
 	cmd.Dir = worktreePath
 	out, err := cmd.CombinedOutput()
@@ -1745,6 +1767,57 @@ func isHeadContentMergedIntoRef(worktreePath, ref string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// NewResetChecker scopes immutable tree listings to one acquisition. Cache by
+// repository and tree object, never a mutable ref such as HEAD or main.
+func NewResetChecker() func(string, string) (bool, string, string, error) {
+	type treeKey struct{ repository, object string }
+	type treeRead struct {
+		entries map[string]string
+		err     error
+	}
+	type repositoryRead struct {
+		path string
+		err  error
+	}
+	trees := make(map[treeKey]treeRead)
+	repositories := make(map[string]repositoryRead)
+	reader := func(dir, ref string) (map[string]string, error) {
+		id, err := runGit(dir, "rev-parse", "--verify", ref+"^{tree}")
+		if err != nil {
+			return nil, err
+		}
+		repository, ok := repositories[dir]
+		if !ok {
+			repository.path, repository.err = CommonGitDir(dir)
+			repositories[dir] = repository
+		}
+		if repository.err != nil {
+			return nil, repository.err
+		}
+		key := treeKey{repository: repository.path, object: id}
+		if tree, ok := trees[key]; ok {
+			return tree.entries, tree.err
+		}
+		tree, err := readTree(dir, id)
+		// A failed immutable read is still one attempt for this acquisition.
+		// Repeating it for each candidate adds cost without a new safety proof.
+		trees[key] = treeRead{entries: tree, err: err}
+		return tree, err
+	}
+	return func(dir, branch string) (bool, string, string, error) {
+		ref, err := resolveResetRef(dir, branch)
+		if err != nil {
+			return false, "", "", err
+		}
+		head, err := worktreeHead(dir)
+		if err != nil {
+			return false, "", "", err
+		}
+		safe, err := headMergedWithReader(dir, ref, reader)
+		return safe, ref, head, err
+	}
 }
 
 func readTree(repoRoot, ref string) (map[string]string, error) {

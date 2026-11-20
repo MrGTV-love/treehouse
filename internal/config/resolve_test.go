@@ -3,16 +3,29 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestResolvePoolDir_EmptyRoot(t *testing.T) {
-	// With empty root, pool dir should be under $HOME/.treehouse/{repoName}-{hash}
-	home, err := os.UserHomeDir()
+// privateHome points HOME and USERPROFILE (what os.UserHomeDir reads on Unix
+// and Windows) at a fresh directory that holds no symlink, so the default pool
+// root never depends on the machine running the test. The directory is
+// canonicalized so the literal expectations below are the real spelling.
+func privateHome(t *testing.T) string {
+	t.Helper()
+	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return home
+}
+
+func TestResolvePoolDir_EmptyRoot(t *testing.T) {
+	// With empty root, pool dir should be under $HOME/.treehouse/{repoName}-{hash}
+	home := privateHome(t)
 
 	// We need a real repo for GetRemoteURL. Use a fake approach by creating
 	// a temp git repo with a remote.
@@ -86,10 +99,7 @@ func TestResolvePoolDir_EnvVarExpansion(t *testing.T) {
 }
 
 func TestResolvePoolRoot_EmptyRoot(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	home := privateHome(t)
 
 	poolRoot, err := ResolvePoolRoot("", "")
 	if err != nil {
@@ -99,6 +109,28 @@ func TestResolvePoolRoot_EmptyRoot(t *testing.T) {
 	expected := filepath.Join(home, ".treehouse")
 	if poolRoot != expected {
 		t.Fatalf("expected pool root %s, got %s", expected, poolRoot)
+	}
+}
+
+func TestResolvePoolRoot_EmptyRootFollowsTreehouseSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege Windows runners may lack")
+	}
+	home := privateHome(t)
+	scratch, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(scratch, filepath.Join(home, ".treehouse")); err != nil {
+		t.Fatal(err)
+	}
+
+	poolRoot, err := ResolvePoolRoot("", "")
+	if err != nil {
+		t.Fatalf("ResolvePoolRoot failed: %v", err)
+	}
+	if poolRoot != scratch {
+		t.Fatalf("expected symlinked pool root to resolve to %s, got %s", scratch, poolRoot)
 	}
 }
 
@@ -144,10 +176,7 @@ func TestResolveRoot_DefaultPathByteForByte(t *testing.T) {
 	// The default (unset) resolution must be byte-for-byte identical to calling
 	// ResolvePoolRoot with the raw config root, i.e. no override leaks in.
 	t.Setenv(RootEnvVar, "")
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	home := privateHome(t)
 
 	root := ResolveRoot("", DefaultConfig())
 	poolRoot, err := ResolvePoolRoot("", root)

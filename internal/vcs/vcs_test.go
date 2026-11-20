@@ -521,3 +521,36 @@ func TestDestructiveWrappersRefuseMarkerlessPath(t *testing.T) {
 		t.Fatalf("enclosing repository HEAD moved off main to %q", ref)
 	}
 }
+
+func TestWorktreeCommonGitDirJJWorkspaceStartsNoJJ(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainRoot := filepath.Join(base, "main")
+	workspace := filepath.Join(base, "pool", "1", "main")
+	for _, dir := range []string{filepath.Join(mainRoot, ".jj", "repo"), filepath.Join(mainRoot, ".git"), filepath.Join(workspace, ".jj")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".jj", "repo"), []byte(filepath.Join(mainRoot, ".jj", "repo")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No jj on PATH: any attempt to start jj inside the workspace fails.
+	t.Setenv("PATH", t.TempDir())
+	got, err := WorktreeCommonGitDir(workspace)
+	if err != nil {
+		t.Fatalf("jj workspace identity needed a jj process: %v", err)
+	}
+	want := filepath.Join(mainRoot, ".git")
+	if got != want {
+		t.Fatalf("WorktreeCommonGitDir = %q, want %q", got, want)
+	}
+	if err := os.Remove(want); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := WorktreeCommonGitDir(workspace); err == nil {
+		t.Fatalf("non-colocated jj workspace resolved to %q", got)
+	}
+}

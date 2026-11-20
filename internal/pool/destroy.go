@@ -420,6 +420,12 @@ func executeDestroy(poolDir string, removable []DestroyTarget, resolveContext pr
 			if _, ok := plannedByPath[state.Worktrees[i].Path]; !ok {
 				continue
 			}
+			if err := slotWritable(poolDir, state.Worktrees[i].Name); err != nil {
+				fenced := plannedByPath[state.Worktrees[i].Path]
+				fenced.Detail = ErrAcquisitionInProgress.Error()
+				skips = append(skips, DestroySkip{Target: fenced})
+				continue
+			}
 			context := resolveDestroyContext(resolveContext, state.Worktrees[i])
 			current := classifyForDestroy(state.Worktrees[i], context.RepoRoot, context.DefaultRef)
 			if planned, ok := plannedByPath[current.Path]; ok && current.Bytes == 0 {

@@ -1,12 +1,15 @@
 package pool
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -147,11 +150,10 @@ func TestAcquire_ForeignReclamationRefusesUnsafeSlots(t *testing.T) {
 						if risk == "process-scan-failure" {
 							return nil, errors.New("process table unavailable")
 						}
-						if risk == "late-process" && calls == 1 {
-							return nil, nil
-						}
 						if risk == "late-hidden-edits" || risk == "late-skip-worktree-edits" {
-							if calls == 2 {
+							// Selection now uses one shared snapshot. This per-slot scan
+							// is the final pre-removal check, after that snapshot.
+							if calls == 1 {
 								flag := "--assume-unchanged"
 								if risk == "late-skip-worktree-edits" {
 									flag = "--skip-worktree"
@@ -300,7 +302,16 @@ func TestAcquire_ForeignReclamationStateWriteFailureStopsBeforeCreation(t *testi
 		t.Fatal(err)
 	}
 	oldWrite := writeState
-	writeState = func(string, State) error { return errors.New("state write failed") }
+	writeState = func(pool string, state State) error {
+		// Claim writes now precede screening. Fail the deletion commit itself,
+		// which also claims the freed capacity, so it must abort before creation.
+		for _, wt := range state.Worktrees {
+			if wt.Path == path {
+				return oldWrite(pool, state)
+			}
+		}
+		return errors.New("state write failed")
+	}
 	t.Cleanup(func() { writeState = oldWrite })
 	got, err := Acquire(caller, poolDir, 1, nil)
 	if err == nil || got != "" {
@@ -431,7 +442,9 @@ func TestAcquire_ForeignReclamationPreservesReplacementTree(t *testing.T) {
 							return oldScan(candidate)
 						}
 						calls++
-						if calls == 2 {
+						// Selection now uses one shared snapshot. This per-slot scan
+						// is the final pre-removal check, after that snapshot.
+						if calls == 1 {
 							runGit(t, path, "replace", base, different)
 							runGit(t, path, "read-tree", "--reset", "-u", base)
 						}
@@ -466,7 +479,7 @@ func TestAcquire_ForeignReclamationPreservesReplacementTree(t *testing.T) {
 				if got := gitOut(t, path, "rev-parse", namespace+base); got != different {
 					t.Fatalf("refusal changed replacement ref: %s != %s", got, different)
 				}
-				if strings.HasPrefix(replacement, "late-") && calls != 2 {
+				if strings.HasPrefix(replacement, "late-") && calls != 1 {
 					t.Fatalf("replacement missed final preflight: scans=%d", calls)
 				}
 			})
@@ -545,7 +558,9 @@ func TestAcquire_ForeignReclamationAuthenticatesIgnoredPaths(t *testing.T) {
 							return oldScan(candidate)
 						}
 						calls++
-						if calls == 2 {
+						// Selection now uses one shared snapshot. This per-slot scan
+						// is the final pre-removal check, after that snapshot.
+						if calls == 1 {
 							writeExtra()
 						}
 						return nil, nil
@@ -584,7 +599,7 @@ func TestAcquire_ForeignReclamationAuthenticatesIgnoredPaths(t *testing.T) {
 				if seeded && risk != "nested" {
 					assertFileContents(t, filepath.Join(path, "local", "config.env"), "authenticated seed\n")
 				}
-				if strings.HasPrefix(risk, "late-") && calls != 2 {
+				if strings.HasPrefix(risk, "late-") && calls != 1 {
 					t.Fatalf("ignored writer missed final preflight: scans=%d", calls)
 				}
 			})
@@ -668,7 +683,9 @@ func TestAcquire_ForeignReclamationSkipsGitRemovalRefusals(t *testing.T) {
 							return oldScan(candidate)
 						}
 						calls++
-						if calls == 2 {
+						// Selection now uses one shared snapshot. This per-slot scan
+						// is the final pre-removal check, after that snapshot.
+						if calls == 1 {
 							if risk == "late-lock" {
 								runGit(t, foreign, "worktree", "lock", "--reason", "late protection", first)
 							} else {
@@ -715,7 +732,7 @@ func TestAcquire_ForeignReclamationSkipsGitRemovalRefusals(t *testing.T) {
 						t.Fatalf("retained modules metadata was not preserved: %v", err)
 					}
 				}
-				if strings.HasPrefix(risk, "late-") && calls != 2 {
+				if strings.HasPrefix(risk, "late-") && calls != 1 {
 					t.Fatalf("late protection missed final preflight: scans=%d", calls)
 				}
 			})
@@ -814,5 +831,186 @@ func TestAcquire_ForeignReclamationAcceptsLiveTipInAnyNamespace(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestAcquire_ForeignReclamationTemplatedFreshNameReusesRemovedName(t *testing.T) {
+	// A template beside the requester must not inherit an enclosing managed
+	// pool from the test runner's scratch directory. Use the OS temp default.
+	for _, name := range []string{"GOTMPDIR", "TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+	foreign, caller, poolDir := setupSharedClonePool(t)
+	path, err := Acquire(foreign, poolDir, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(poolDir, path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := AcquireWithOptions(caller, poolDir, 1, nil, AcquireOptions{WorktreePath: "{repo_parent}/{repo}-{slot}"})
+	if err != nil {
+		t.Fatalf("templated reclamation failed: %v", err)
+	}
+	if want := filepath.Join(filepath.Dir(caller), filepath.Base(caller)+"-1"); got != want {
+		t.Fatalf("acquired %s, want %s", got, want)
+	}
+	assertCloneCommonDir(t, got, caller)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("foreign slot was not reclaimed: %v", err)
+	}
+	state, err := ReadState(poolDir)
+	if err != nil || len(state.Worktrees) != 1 || state.Worktrees[0].Name != "1" || state.Worktrees[0].Path != got {
+		t.Fatalf("templated reclamation state: %#v (%v)", state, err)
+	}
+}
+
+func TestAcquireStaleCapacityHelper(t *testing.T) {
+	if os.Getenv("TREEHOUSE_STALE_CAPACITY_HELPER") != "1" {
+		t.Skip("helper process")
+	}
+	acquisitionStage = func(stage, path string) {
+		if stage == "snapshot" {
+			fmt.Println("HELD")
+			_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+		}
+	}
+	lease, err := AcquireLeaseInfoWithOptions(os.Getenv("TREEHOUSE_STALE_REPO"), os.Getenv("TREEHOUSE_STALE_POOL"), 2, nil, "stale capacity", AcquireOptions{SkipFetch: true})
+	if err != nil {
+		fmt.Println("ERR " + err.Error())
+		return
+	}
+	fmt.Println("PATH " + lease.Path)
+}
+
+type staleCapacityGet struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Reader
+	stderr *strings.Builder
+}
+
+func startStaleCapacityGet(t *testing.T, caller, poolDir string) *staleCapacityGet {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAcquireStaleCapacityHelper$")
+	cmd.Env = append(os.Environ(), "TREEHOUSE_STALE_CAPACITY_HELPER=1", "TREEHOUSE_STALE_REPO="+caller, "TREEHOUSE_STALE_POOL="+poolDir)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr := &strings.Builder{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	get := &staleCapacityGet{cmd: cmd, stdin: stdin, stdout: bufio.NewReader(stdout), stderr: stderr}
+	if line, err := get.stdout.ReadString('\n'); err != nil || line != "HELD\n" {
+		t.Fatalf("get did not stop after its snapshot: %q (%v)\n%s", line, err, stderr)
+	}
+	return get
+}
+
+func (g *staleCapacityGet) finish(t *testing.T) string {
+	t.Helper()
+	if _, err := io.WriteString(g.stdin, "\n"); err != nil {
+		t.Fatal(err)
+	}
+	var result string
+	for {
+		line, err := g.stdout.ReadString('\n')
+		if strings.HasPrefix(line, "PATH ") || strings.HasPrefix(line, "ERR ") {
+			result = strings.TrimSpace(line)
+		}
+		if err != nil {
+			break
+		}
+	}
+	if err := g.cmd.Wait(); err != nil {
+		t.Fatalf("get process failed: %v\n%s", err, g.stderr)
+	}
+	return result
+}
+
+func TestAcquire_StaleCapacitySnapshotReclaimsForeignOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("helper processes hold a Unix-tested stdin schedule")
+	}
+	for _, guarded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("guarded=%t", guarded), func(t *testing.T) {
+			foreign, caller, poolDir := setupSharedClonePool(t)
+			x, err := Acquire(foreign, poolDir, 2, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Release(poolDir, x); err != nil {
+				t.Fatal(err)
+			}
+			keep := filepath.Join(x, "keep.txt")
+			if guarded {
+				if err := os.WriteFile(keep, []byte("foreign work\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := ReadState(poolDir)
+			if err != nil || len(before.Worktrees) != 1 {
+				t.Fatalf("fixture must hold N-1 entries: %#v (%v)", before, err)
+			}
+			a := startStaleCapacityGet(t, caller, poolDir)
+			b := startStaleCapacityGet(t, caller, poolDir)
+			first := a.finish(t)
+			if !strings.HasPrefix(first, "PATH ") {
+				t.Fatalf("first get failed: %s\n%s", first, a.stderr)
+			}
+			second := b.finish(t)
+			checked := strings.Count(b.stderr.String(), "treehouse: checked "+x+":")
+			if checked != 1 {
+				t.Fatalf("second get reported X %d times:\n%s", checked, b.stderr)
+			}
+			state, err := ReadState(poolDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if guarded {
+				if !strings.HasPrefix(second, "ERR all 2 worktrees are in use") {
+					t.Fatalf("guarded X did not end with the capacity refusal: %s\n%s", second, b.stderr)
+				}
+				if data, err := os.ReadFile(keep); err != nil || string(data) != "foreign work\n" {
+					t.Fatalf("guarded X lost its contents: %q (%v)", data, err)
+				}
+				for _, wt := range state.Worktrees {
+					if wt.Path == x && !reflect.DeepEqual(wt, before.Worktrees[0]) {
+						t.Fatalf("second pass left a reservation on X: %#v", wt)
+					}
+				}
+				if len(state.Worktrees) != 2 {
+					t.Fatalf("state changed beyond the first get: %#v", state)
+				}
+				return
+			}
+			if !strings.HasPrefix(second, "PATH ") || second == first {
+				t.Fatalf("second get did not reclaim X: %s (first %s)\n%s", second, first, b.stderr)
+			}
+			if _, err := os.Stat(x); !os.IsNotExist(err) {
+				t.Fatalf("X was not removed: %v", err)
+			}
+			if strings.Contains(a.stderr.String(), "reclaimed idle foreign-clone worktree") || strings.Count(b.stderr.String(), "reclaimed idle foreign-clone worktree") != 1 {
+				t.Fatalf("X was not removed exactly once:\nA:\n%s\nB:\n%s", a.stderr, b.stderr)
+			}
+			if len(state.Worktrees) != 2 {
+				t.Fatalf("state after both gets: %#v", state)
+			}
+			for _, wt := range state.Worktrees {
+				if wt.Path == x || !wt.Leased || wt.LeaseHolder != "stale capacity" {
+					t.Fatalf("unexpected entry after both gets: %#v", wt)
+				}
+				assertCloneCommonDir(t, wt.Path, caller)
+			}
+		})
 	}
 }

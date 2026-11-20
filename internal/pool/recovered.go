@@ -87,6 +87,9 @@ func HandoffRecoveredLease(poolDir, path, expectedHolder, holder string) (LeaseI
 		if wt.LeaseHolder != expectedHolder {
 			return fmt.Errorf("lease holder does not match for worktree %s", wt.Name)
 		}
+		if err := slotWritable(poolDir, wt.Name); err != nil {
+			return err
+		}
 		if err := markAcquired(wt, acquireOptions{lease: true, leaseHolder: holder}); err != nil {
 			return err
 		}

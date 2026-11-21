@@ -153,9 +153,11 @@ func identityFailureEnv(t *testing.T, dirs ...string) []string {
 	}
 	shim := t.TempDir()
 	source := fmt.Sprintf(`package main
-import("os";"os/exec";"strings";"fmt")
+import("os";"os/exec";"path/filepath";"strings";"fmt")
 func main(){
+ // The checkout a query names: its --git-dir marker, else the working directory.
  cwd,_:=os.Getwd()
+ for _,arg:=range os.Args[1:] { if dir,ok:=strings.CutPrefix(arg,"--git-dir=");ok { cwd=filepath.Dir(dir) } }
  for _,arg:=range os.Args[1:] { if arg=="--git-common-dir" {
   for _,dir:=range strings.Split(os.Getenv("TREEHOUSE_TEST_UNREADABLE_IDENTITIES"),string(os.PathListSeparator)) { if cwd==dir { fmt.Fprintln(os.Stderr,"injected unreadable requester identity"); os.Exit(71) } }
   if cwd==os.Getenv("TREEHOUSE_TEST_ALIAS_SLOT") && os.Getenv("TREEHOUSE_TEST_ALIAS_COMMON_DIR")!="" { fmt.Println(os.Getenv("TREEHOUSE_TEST_ALIAS_COMMON_DIR"));os.Exit(0) }

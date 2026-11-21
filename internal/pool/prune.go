@@ -458,6 +458,10 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 				continue
 			}
 
+			if err := slotWritable(poolDir, state.Worktrees[i].Name); err != nil {
+				result.Skipped = append(result.Skipped, newPruneSkipped(state.Worktrees[i].Name, state.Worktrees[i].Path, pruneSkipInUse, ErrAcquisitionInProgress.Error(), err.Error()))
+				continue
+			}
 			worktree, skipped, stale, context, err := analyzePruneCandidate(poolDir, fixedPruneContextResolver(plannedWorktree.Context), state.Worktrees[i], options)
 			if err != nil {
 				return err

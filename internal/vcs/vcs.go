@@ -274,6 +274,20 @@ func GetDefaultBranch(repoRoot string) (string, error) {
 // containing dir.
 func CommonGitDir(dir string) (string, error) { return backendFor(dir).CommonGitDir(dir) }
 
+// WorktreeCommonGitDir is CommonGitDir for a checkout root. When the root's
+// own marker names git or jj, the query starts no process inside the checkout
+// (git runs through --git-dir; jj is answered from its store pointer), so it is
+// never a tenant of a copy another get may be screening.
+func WorktreeCommonGitDir(path string) (string, error) {
+	switch WorktreeBackendName(path) {
+	case "git":
+		return gitvcs.WorktreeCommonGitDir(path)
+	case "jj":
+		return jjvcs.WorkspaceCommonGitDir(path)
+	}
+	return CommonGitDir(path)
+}
+
 // HasRemote reports whether the named remote exists.
 func HasRemote(repoRoot, name string) bool { return backendFor(repoRoot).HasRemote(repoRoot, name) }
 
@@ -604,6 +618,18 @@ func ResetWorktreeToRefWithSeededPaths(worktreePath, ref, expectedHead string, r
 // the worktree HEAD recorded at check time.
 func IsWorktreeSafeToReset(worktreePath, branch string) (bool, string, string, error) {
 	return backendForWorktree(worktreePath).IsWorktreeSafeToReset(worktreePath, branch)
+}
+
+// NewResetChecker shares immutable Git tree listings across one candidate walk.
+// Other backends keep their existing reset-safety semantics.
+func NewResetChecker() func(string, string) (bool, string, string, error) {
+	gitCheck := gitvcs.NewResetChecker()
+	return func(path, branch string) (bool, string, string, error) {
+		if WorktreeBackendName(path) == "git" {
+			return gitCheck(path, branch)
+		}
+		return IsWorktreeSafeToReset(path, branch)
+	}
 }
 
 // DetachWorktree releases any branch the worktree has checked out.

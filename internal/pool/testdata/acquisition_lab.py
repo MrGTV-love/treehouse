@@ -1,0 +1,855 @@
+"""Private local-repository CLI regression lab. No production pool is opened."""
+import argparse
+import fcntl
+import json
+import os
+import re
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+PARSER = argparse.ArgumentParser()
+PARSER.add_argument('binary')
+PARSER.add_argument('--base', action='store_true')
+PARSER.add_argument('--evidence')
+PARSER.add_argument('--only', choices=['all','same','foreign','concurrent','safety','cache-failure','progress','independent-below','first-copy','second-pass','return-fenced','stale-view'], default='all')
+ARGS = PARSER.parse_args()
+BINARY = str(Path(ARGS.binary).resolve())
+REAL_GIT = shutil.which('git')
+ROOT = Path(tempfile.mkdtemp(prefix='treehouse-acquisition-lab-')).resolve()
+SOCKET_ROOT = tempfile.TemporaryDirectory(prefix='th-sync-')
+REPORT = []
+
+
+def record(message):
+    print(message, flush=True)
+    REPORT.append(message)
+
+
+def git(repo, *args, output=False):
+    result = subprocess.run([REAL_GIT, '-C', str(repo), *args], check=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return result.stdout.strip() if output else None
+
+
+SHIM = r'''import fcntl,json,os,socket,subprocess,sys,time
+args=sys.argv[1:]; cwd=os.getcwd(); root=os.environ['LAB_ROOT']; run=os.environ.get('LAB_ID','single')
+f=open(os.environ['LAB_LOCK'],'a+')
+try:
+ fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB); status='FREE'; fcntl.flock(f,fcntl.LOCK_UN)
+except BlockingIOError: status='LOCKED'
+event=dict(status=status,cwd=cwd,args=args,run=run)
+if 'ls-tree' in args and '-r' in args:
+ ref=args[-1]
+ result=subprocess.run([os.environ['LAB_REAL_GIT'],'-C',cwd,'rev-parse','--verify',ref+'^{tree}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+ event['tree']=result.stdout.strip()
+with open(os.environ['LAB_LOG'],'a') as log: log.write(json.dumps(event)+'\n')
+if os.environ.get('LAB_FAIL_TREE') and event.get('tree')==os.environ['LAB_FAIL_TREE']: sys.exit(1)
+def hit(kind,target):
+ return (kind in ('selection','selection-stay') and cwd==target and 'status' in args or
+       kind=='reset' and cwd==target and 'read-tree' in args or
+       kind=='foreign-selection' and cwd==target and 'ls-files' in args and '-v' in args or
+       kind=='foreign-remove' and 'worktree' in args and 'remove' in args and target in args or
+       kind=='fresh-add' and 'worktree' in args and 'add' in args or
+       kind=='preclaim' and '--git-common-dir' in args and (cwd==target or '--git-dir='+os.path.join(target,'.git') in args) or
+       kind in ('progress','progress-foreign') and cwd in json.loads(os.environ['LAB_PROGRESS_PATHS']) and
+       ('status' in args if kind=='progress' else 'ls-files' in args and '-v' in args))
+kind=os.environ.get('LAB_HOLD',''); target=os.environ.get('LAB_TARGET','')
+match=hit(kind,target); tag=''
+if not match and hit(os.environ.get('LAB_HOLD2',''),os.environ.get('LAB_TARGET2','')):
+ match=True; kind=os.environ['LAB_HOLD2']; tag='-2'
+if match:
+ marker=os.path.join(root,'held-'+run+tag+('-'+os.path.basename(os.path.dirname(cwd)) if kind.startswith('progress') else ''))
+ try:
+  fd=os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY); os.close(fd)
+ except FileExistsError: pass
+ else:
+  # A shim awaiting the controller is not a tenant of the candidate checkout,
+  # except a preclaim hold: its working directory is exactly what is tested.
+  # A selection-stay hold is a git process that stays inside the candidate.
+  stay=kind in ('preclaim','selection-stay')
+  if not stay: os.chdir(root)
+  s=socket.socket(socket.AF_UNIX); os.chdir(os.path.dirname(os.environ['LAB_SOCKET'])); s.connect(os.path.basename(os.environ['LAB_SOCKET'])); os.chdir(cwd if stay else root); s.sendall(b'H'); s.recv(1); s.close()
+  os.chdir(cwd)
+if os.environ.get('LAB_DELAY'): time.sleep(float(os.environ['LAB_DELAY']))
+os.execv(os.environ['LAB_REAL_GIT'],[os.environ['LAB_REAL_GIT']]+args)
+'''
+
+
+class Fixture:
+    serial = 0
+
+    def __init__(self, count, foreign=False, rejected=0):
+        Fixture.serial += 1
+        self.root = ROOT / str(Fixture.serial)
+        self.root.mkdir()
+        self.repo = self.root / 'a' / 'repo'
+        self.repo.mkdir(parents=True)
+        git(self.repo, 'init', '-b', 'main')
+        git(self.repo, 'config', 'user.email', 'fixture@example.invalid')
+        git(self.repo, 'config', 'user.name', 'Fixture')
+        (self.repo / 'README').write_text('recognizable original\n')
+        (self.repo / '.gitignore').write_text('ignored.log\n')
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-m', 'base')
+        remote = self.root / 'remote.git'
+        git(self.repo, 'clone', '--bare', str(self.repo), str(remote))
+        git(self.repo, 'remote', 'add', 'origin', str(remote))
+        git(self.repo, 'fetch', 'origin')
+        self.caller = self.repo
+        if foreign:
+            self.caller = self.root / 'b' / 'repo'
+            git(self.repo, 'clone', str(remote), str(self.caller))
+        coverage = self.root/'coverage'
+        coverage.mkdir()
+        self.env = os.environ.copy()
+        self.env.update(GOCOVERDIR=str(coverage), TREEHOUSE_ROOT=str(self.root / 'pools'), TREEHOUSE_VCS='git',
+                        HOME=str(self.root / 'home'), XDG_CONFIG_HOME=str(self.root / 'config'))
+        (self.root / 'home').mkdir()
+        self.pool = Path(self.command('pool-dir').stdout.strip())
+        self.pool.mkdir(parents=True, exist_ok=True)
+        self.paths = []
+        entries = []
+        for n in range(1, count + 1):
+            path = self.pool / str(n) / 'repo'
+            git(self.repo, 'worktree', 'add', '--detach', str(path), 'main')
+            self.paths.append(str(path))
+            if n <= rejected:
+                (path / 'README').write_text('unlanded unique content '+str(n)+'\n')
+                git(path, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'add', 'README')
+                git(path, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'unlanded')
+            entries.append(dict(name=str(n), path=str(path), created_at='2026-01-01T00:00:00Z'))
+        (self.pool / 'treehouse-state.json').write_text(json.dumps(dict(worktrees=entries)))
+        self.log = self.root / 'git.jsonl'
+        shim = self.root / 'bin'
+        shim.mkdir()
+        (shim / 'git').write_text('#!'+sys.executable+'\n'+SHIM)
+        (shim / 'git').chmod(0o755)
+        # Unix socket paths have a small fixed limit, independent of pool layout.
+        self.socket_path = Path(SOCKET_ROOT.name) / str(Fixture.serial)
+        self.env.update(PATH=str(shim)+os.pathsep+self.env['PATH'], LAB_ROOT=str(self.root),
+                        LAB_LOCK=str(self.pool / 'treehouse-state.lock'), LAB_LOG=str(self.log),
+                        LAB_REAL_GIT=REAL_GIT, LAB_SOCKET=str(self.socket_path))
+        (self.caller / 'treehouse.toml').write_text('max_trees = '+str(count)+'\n')
+        # The caller's config is untracked only in the main checkout, never a slot.
+
+    def command(self, *args, **kw):
+        return subprocess.run([BINARY, *args], cwd=self.caller, env=self.env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
+
+    def start(self, label, hold='', path='', cwd=None, **environment):
+        return subprocess.Popen([BINARY, 'get', '--lease', '--no-fetch', '--lease-holder', label],
+                                cwd=cwd or self.caller, env=dict(self.env, LAB_ID=label, LAB_HOLD=hold, LAB_TARGET=path, **environment),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def finish(self, proc):
+        out, err = proc.communicate()
+        assert proc.returncode == 0, (proc.returncode, out, err)
+        return out.strip()
+
+    def state(self):
+        return json.loads((self.pool / 'treehouse-state.json').read_text())['worktrees']
+
+    def locked(self):
+        with open(self.pool / 'treehouse-state.lock', 'a+') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                return False
+            except BlockingIOError:
+                return True
+
+    def events(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+
+def bind_server(server, fixture):
+    # AF_UNIX limits the address, not its resolved path. Bind a short name
+    # from the selected temp directory instead of escaping TMPDIR to /tmp.
+    previous = os.getcwd()
+    try:
+        os.chdir(fixture.socket_path.parent)
+        server.bind(fixture.socket_path.name)
+    finally:
+        os.chdir(previous)
+    server.listen()
+
+
+def concurrent(kind, count, spare, extra_capacity=0):
+    foreign = kind.startswith('foreign')
+    f = Fixture(count + spare, foreign=foreign)
+    if extra_capacity:
+        (f.caller/'treehouse.toml').write_text('max_trees = '+str(count + spare + extra_capacity)+'\n')
+    server = socket.socket(socket.AF_UNIX)
+    bind_server(server, f)
+    processes = []
+    connection = None
+    try:
+        first = f.start('first', kind, f.paths[0]); processes.append(first)
+        connection, _ = server.accept()
+        assert connection.recv(1) == b'H'
+        held = f.locked()
+        assert held == ARGS.base, (kind, 'pool lock held at stalled check', held)
+        others = [f.start('other-'+str(i)) for i in range(count-1)]
+        processes.extend(others)
+        paths = []
+        if not ARGS.base:
+            paths = [f.finish(proc) for proc in others]
+            assert first.poll() is None, 'first was not still held'
+            if not foreign:
+                assert set(paths) <= set(f.paths[1:]), ('TG2 did not return pre-existing independent capacity', paths, f.paths)
+                assert len(f.state()) == count + spare, ('TG2 changed record count while first held', len(f.state()), count + spare)
+                record('TG2 existing independent slots selected while first held; record count='+str(len(f.state()))+' extra_capacity='+str(extra_capacity)+' fixture='+str(f.root))
+            record('TG2 '+kind+' '+str(count)+': other gets completed while first held: '+repr(paths))
+        else:
+            record('TG2 BASE '+kind+': kernel lock excludes second get until release')
+        connection.sendall(b'R'); connection.close(); connection = None
+        paths.append(f.finish(first))
+        if ARGS.base:
+            paths.extend(f.finish(proc) for proc in others)
+        assert len(set(paths)) == count, paths
+        reserved = {entry['path']:entry for entry in f.state() if entry.get('leased')}
+        assert set(paths) <= reserved.keys(), ('lost persisted reservation', paths, reserved)
+        assert all(reserved[path].get('lease_id') for path in paths)
+        further = f.command('get', '--lease', '--no-fetch')
+        if spare:
+            assert further.returncode == 0 and further.stdout.strip() not in paths, (further.stdout, further.stderr)
+        elif extra_capacity:
+            assert further.returncode == 0 and further.stdout.strip() not in paths, (further.stdout, further.stderr)
+        else:
+            assert further.returncode != 0 and not further.stdout.strip(), (further.stdout, further.stderr)
+        record('TG2 '+kind+': distinct allocations and persisted leases retained; spare='+str(spare)+'; fixture='+str(f.root))
+    finally:
+        if connection is not None:
+            connection.sendall(b'R'); connection.close()
+        server.close()
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
+
+
+def exclusive(kind):
+    f = Fixture(1, foreign=kind.startswith('foreign'))
+    server=socket.socket(socket.AF_UNIX);bind_server(server, f)
+    first=f.start('exclusive-first',kind,f.paths[0]);connection=None
+    try:
+        connection,_=server.accept();assert connection.recv(1)==b'H'
+        assert f.locked()==ARGS.base
+        if not ARGS.base:
+            refused=f.command('get','--lease','--no-fetch')
+            assert refused.returncode!=0 and not refused.stdout.strip(), ('claimed only capacity was handed out',refused.stdout,refused.stderr)
+        connection.sendall(b'R');connection.close();connection=None
+        path=f.finish(first)
+        if ARGS.base:
+            refused=f.command('get','--lease','--no-fetch')
+            assert refused.returncode!=0 and not refused.stdout.strip()
+        state=f.state();assert len(state)==1 and state[0]['path']==path and state[0].get('leased')
+        record('TG2 '+kind+' only capacity fenced/reserved, independent capacity absent: refusal preserves first lease; fixture='+str(f.root))
+    finally:
+        if connection is not None: connection.sendall(b'R');connection.close()
+        server.close()
+        if first.poll() is None:first.kill()
+        first.communicate()
+
+
+def unfenced_identity():
+    # A get's clone filter runs before it fences a copy. While it is held
+    # there, a second get must still be able to claim that copy: the filter
+    # must not be a process inside the checkout for the second get's snapshot.
+    f = Fixture(1)
+    server = socket.socket(socket.AF_UNIX)
+    bind_server(server, f)
+    first = f.start('preclaim-first', 'preclaim', f.paths[0]); connection = None
+    try:
+        connection, _ = server.accept()
+        assert connection.recv(1) == b'H'
+        assert not f.locked(), 'pool lock held at the clone filter'
+        second = f.command('get', '--lease', '--no-fetch')
+        assert second.returncode == 0 and second.stdout.strip() == f.paths[0], ('unfenced clone filter made a sibling refuse a free copy', second.returncode, second.stdout, second.stderr)
+        connection.sendall(b'R'); connection.close(); connection = None
+        out, err = first.communicate()
+        assert first.returncode != 0 and not out.strip(), ('only copy handed out twice', first.returncode, out, err)
+        state = f.state()
+        assert len(state) == 1 and state[0]['path'] == f.paths[0] and state[0].get('leased'), state
+        record('TG2 unfenced clone filter is not a tenant: a sibling claims the copy it was filtering; fixture='+str(f.root))
+    finally:
+        if connection is not None: connection.sendall(b'R'); connection.close()
+        server.close()
+        if first.poll() is None: first.kill()
+        first.communicate()
+
+
+def function_entries(fixture, label, function):
+    # Go's execution counters observe actual function entries even when a pass
+    # skips every leased record without issuing any candidate Git call.
+    result = subprocess.run(['go', 'tool', 'covdata', 'debugdump',
+                             '-i='+str(fixture.root/('coverage-'+label)),
+                             '-pkg=github.com/kunchenguid/treehouse/v3/internal/pool'],
+                            check=True, capture_output=True, text=True)
+    (fixture.root/('coverage-'+label+'.txt')).write_text(result.stdout)
+    match = re.search(r'^Func: '+re.escape(function)+r'\nSrcfile: [^\n]+\nLiteral: false\n0: [^\n]+ = (\d+)$',
+                      result.stdout, re.MULTILINE)
+    assert match, ('missing execution counter; build the CLI with -cover -covermode=atomic', function, result.stdout)
+    return int(match[1])
+
+
+def second_pass(guarded=False):
+    f = Fixture(2, foreign=True)
+    # Exactly N-1 records: own-clone slot 1 has a durable lease held by a live
+    # tenant, slot 2 is idle foreign X, and max_trees is N=3.
+    git(f.repo, 'worktree', 'remove', f.paths[0])
+    git(f.caller, 'worktree', 'add', '--detach', f.paths[0], 'main')
+    (f.caller/'treehouse.toml').write_text('max_trees = 3\n')
+    tenant = subprocess.Popen([sys.executable, '-c',
+                              "import sys; print('OWNER_READY',flush=True); sys.stdin.read()"],
+                             cwd=f.paths[0], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    processes = []
+    connections = []
+    server = socket.socket(socket.AF_UNIX)
+    bind_server(server, f)
+    try:
+        assert tenant.stdout.readline().strip() == 'OWNER_READY'
+        leased = f.command('lease', '1', '--lease-holder', 'live owner '+str(tenant.pid))
+        assert leased.returncode == 0, leased.stderr
+        initial = f.state()
+        assert len(initial) == 2 and initial[0]['leased'] and not initial[1].get('leased'), initial
+        x = f.paths[1]
+        for label in ('A', 'B'):
+            coverage = f.root/('coverage-'+label)
+            coverage.mkdir()
+            proc = f.start(label, 'preclaim', x, GOCOVERDIR=str(coverage))
+            processes.append(proc)
+            connection, _ = server.accept()
+            connections.append(connection)
+            assert connection.recv(1) == b'H'
+            assert not f.locked() and f.state() == initial, 'initial snapshot was not below the cap'
+            # Reaching X's first identity query proves that this get has read
+            # its initial table. No writer changes that table before both gates.
+            (f.root/('initial-state-'+label+'.json')).write_text(json.dumps(initial))
+            record('TG2 second-pass '+label+' initial view: N=3 records=2 X=2 idle; slot1 leased live pid='+str(tenant.pid)+'; fixture='+str(f.root))
+        connections[0].sendall(b'R'); connections[0].close(); connections[0] = None
+        a_out, a_err = processes[0].communicate()
+        a_path = str(f.pool/'3'/'repo')
+        assert processes[0].returncode == 0 and a_out == a_path+'\n', (a_out, a_err)
+        at_cap = f.state()
+        assert len(at_cap) == 3 and at_cap[0] == initial[0] and at_cap[1] == initial[1], at_cap
+        assert at_cap[2]['path'] == a_path and at_cap[2]['leased'] and at_cap[2]['lease_holder'] == 'A'
+        assert tenant.poll() is None and processes[1].poll() is None
+        assert not any('worktree' in e['args'] and 'remove' in e['args'] and x in e['args'] for e in f.events())
+        if guarded:
+            protected = f.command('lease', '2', '--lease-holder', 'protect foreign X')
+            assert protected.returncode == 0, protected.stderr
+            at_cap = f.state()
+        connections[1].sendall(b'R'); connections[1].close(); connections[1] = None
+        b_out, b_err = processes[1].communicate()
+        (f.root/'A.stderr').write_text(a_err)
+        (f.root/'B.stderr').write_text(b_err)
+        state = f.state()
+        # The real CLI outcomes establish legitimate completion and safety;
+        # the independent entry counters additionally reject finite extra scans.
+        if guarded:
+            assert processes[1].returncode != 0 and not b_out and 'all 3 worktrees are in use' in b_err, ('TG2 guarded second pass must refuse capacity', b_out, b_err)
+            assert state == at_cap and Path(x).exists(), ('TG2 guarded second pass changed X or its reservation', state, at_cap)
+            assert (Path(x)/'README').read_text() == 'recognizable original\n'
+        else:
+            b_path = str(f.pool/'4'/'repo')
+            assert processes[1].returncode == 0 and b_out == b_path+'\n', ('TG2 second get did not reclaim X', b_out, b_err)
+            assert not Path(x).exists() and len(state) == 3 and state[0] == initial[0], state
+            retained = {entry['path']:entry for entry in state}
+            assert retained[a_path] == at_cap[2], ('TG2 second get lost A reservation', state)
+            assert retained[b_path]['leased'] and retained[b_path]['lease_holder'] == 'B'
+            assert retained[a_path]['lease_id'] != retained[b_path]['lease_id']
+        for label, stderr in (('A', a_err), ('B', b_err)):
+            rows = [row for row in progress_rows(stderr) if row[0] == x]
+            assert len(rows) == 1 and rows[0][1] == 'refused' and 'other clone' in rows[0][2], ('TG8 second-pass duplicate or incorrect X completion', label, rows)
+        removals = [e for e in f.events() if 'worktree' in e['args'] and 'remove' in e['args'] and x in e['args']]
+        assert len(removals) == (0 if guarded else 1) and all(e['run'] == 'B' for e in removals), removals
+        assert function_entries(f, 'A', 'reclaimForeignWorktree') == 0, 'A entered reclamation below the cap'
+        assert function_entries(f, 'B', 'claimFresh') == 1, 'B did not attempt the fresh claim exactly once'
+        passes = function_entries(f, 'B', 'reclaimForeignWorktree')
+        assert passes == 1, ('TG2 second reclamation pass entry count', passes, guarded)
+        assert function_entries(f, 'B', 'reserveFresh') == (1 if guarded else 2), 'unexpected capacity-claim path'
+        record('TG2 second-pass guarded='+str(guarded)+' B fresh claim nil at 3 records; reclamation entries='+str(passes)+' removals='+str(len(removals))+'; retained distinct leases or exact protected state; TG8 X reported once; fixture='+str(f.root))
+    finally:
+        for connection in connections:
+            if connection is not None:
+                connection.sendall(b'R'); connection.close()
+        server.close()
+        for proc in processes:
+            if proc.poll() is None: proc.kill()
+            proc.communicate()
+        tenant.kill(); tenant.communicate()
+
+
+def fenced_return():
+    f = Fixture(1)
+    server = socket.socket(socket.AF_UNIX)
+    bind_server(server, f)
+    first = f.start('fenced-get', 'selection', f.paths[0])
+    connection = None
+    try:
+        connection, _ = server.accept()
+        assert connection.recv(1) == b'H' and not f.locked()
+        before = f.state()
+        contents = (Path(f.paths[0])/'README').read_bytes()
+        result = f.command('return', '--all', '--force')
+        assert result.returncode == 1, ('fenced-only return --all must fail', result.returncode, result.stdout, result.stderr)
+        assert '1 failed:' in result.stderr and 'acquisition in progress' in result.stderr, result.stderr
+        assert 'Returned 0 of 1 held worktree(s); 0 skipped' in result.stderr, result.stderr
+        assert first.poll() is None and f.state() == before, 'return waited for or changed the fenced get'
+        assert (Path(f.paths[0])/'README').read_bytes() == contents
+        connection.sendall(b'R'); connection.close(); connection = None
+        assert f.finish(first) == f.paths[0]
+        state = f.state()
+        assert len(state) == 1 and state[0]['leased'] and state[0]['lease_holder'] == 'fenced-get', state
+        record('TG6 return --all: fenced-only run exits 1 without waiting or changing state/content; original get publishes its lease; fixture='+str(f.root))
+    finally:
+        if connection is not None: connection.sendall(b'R'); connection.close()
+        server.close()
+        if first.poll() is None: first.kill()
+        first.communicate()
+
+
+def stale_view(foreign=False, held=False, alive=False):
+    # Get C claims X and keeps its git inside X while get A reads state and
+    # takes its process snapshot. X is dirty only while C screens it, so C
+    # alone refuses it. A reaches X only after an earlier candidate W, so both
+    # of A's walk-start views of X are stale unless C still holds X.
+    f = Fixture(2, foreign=foreign)
+    w, x = f.paths
+    readme = Path(x)/'README'
+    original = readme.read_text()
+    (Path(w)/'notes').write_text('keep refused candidate\n')
+    for config in {f.caller, f.repo}:
+        (config/'treehouse.toml').write_text('max_trees = 3\n')
+    server = socket.socket(socket.AF_UNIX)
+    bind_server(server, f)
+    processes, connections = {}, {}
+
+    def gate(name):
+        connection, _ = server.accept()
+        assert connection.recv(1) == b'H', name
+        connections[name] = connection
+
+    def release(name):
+        connection = connections.pop(name)
+        connection.sendall(b'R'); connection.close()
+
+    def finish(label):
+        out, err = processes[label].communicate()
+        return processes[label].returncode, out, err
+
+    walk = 'foreign' if foreign else 'primary'
+    variant = 'held' if held else ('alive' if alive else 'exited')
+    try:
+        if foreign:
+            processes['A'] = f.start('A', 'preclaim', x, LAB_HOLD2='foreign-selection', LAB_TARGET2=w)
+            gate('A')
+            filler = f.command('get', '--lease', '--no-fetch')
+            assert filler.returncode == 0 and filler.stdout == str(f.pool/'3'/'repo')+'\n', (filler.stdout, filler.stderr)
+            processes['C'] = f.start('C', 'selection-stay', x, cwd=f.repo)
+            gate('C')
+            release('A')
+            gate('A2')
+        else:
+            processes['C'] = f.start('C', 'selection-stay', x, LAB_HOLD2='fresh-add')
+            gate('C')
+            processes['A'] = f.start('A', 'preclaim', w)
+            gate('A2')
+        owner = {entry['path']: entry for entry in f.state()}[x]
+        assert owner.get('owner_pid') == processes['C'].pid, ('C does not hold X while A is parked', owner)
+        readme.write_text('seen dirty only by C\n')
+        if held:
+            release('A2')
+            code, out, err = finish('A')
+            assert out.strip() != x, ('a slot still held at the re-check was handed out', walk, out, err)
+            if foreign:
+                assert code != 0 and 'all 3 worktrees are in use' in err, (walk, code, out, err)
+            else:
+                assert code == 0 and out == str(f.pool/'3'/'repo')+'\n', (walk, code, out, err)
+            if not foreign:
+                rows = {row[0]: row for row in progress_rows(err)}
+                assert rows[x][1] == 'refused' and 'owner' in rows[x][2], ('held X refusal reason', rows)
+            assert {entry['path']: entry for entry in f.state()}[x].get('owner_pid') == processes['C'].pid
+            assert readme.read_text() == 'seen dirty only by C\n'
+            release('C')
+            finish('C')
+        else:
+            release('C')
+            if foreign:
+                code, out, err = finish('C')
+                assert code != 0 and 'all 3 worktrees are in use' in err, ('C must refuse at the cap', code, out, err)
+            else:
+                gate('C2')
+            readme.write_text(original)
+            if not foreign:
+                if not alive:
+                    release('C2')
+                    code, out, err = finish('C')
+                    assert code == 0 and out == str(f.pool/'3'/'repo')+'\n', (code, out, err)
+            release('A2')
+            code, out, err = finish('A')
+            expected = str(f.pool/'4'/'repo') if foreign else x
+            assert code == 0 and out == expected+'\n', ('stale walk view refused a free slot', walk, variant, code, out, err)
+            assert 'worktrees are in use' not in err, err
+            if foreign:
+                assert not Path(x).exists(), 'free foreign X was not reclaimed'
+            else:
+                rows = {row[0]: row for row in progress_rows(err)}
+                assert rows[x][1] == 'accepted', ('free X was not accepted', rows)
+                entry = {entry['path']: entry for entry in f.state()}[x]
+                assert entry.get('leased') and entry.get('lease_holder') == 'A', entry
+            if alive:
+                assert processes['C'].poll() is None, 'C exited before A finished'
+                release('C2')
+                code, out, err = finish('C')
+                assert code == 0 and out == str(f.pool/'3'/'repo')+'\n', (code, out, err)
+        assert (Path(w)/'notes').read_text() == 'keep refused candidate\n'
+        record('TG2 stale walk view '+walk+' '+variant+': X '+('refused while still held' if held else 'claimed after C released it')+'; fixture='+str(f.root))
+    finally:
+        for connection in connections.values():
+            connection.sendall(b'R'); connection.close()
+        server.close()
+        for proc in processes.values():
+            if proc.poll() is None: proc.kill()
+            proc.communicate()
+
+
+def candidate_path(event, paths):
+    # Clone identity probes run from the caller, not inside an unfenced slot.
+    # Attribute their explicit Git directory as well as ordinary slot-cwd calls.
+    for path in paths:
+        if event['cwd'] == path or '--git-dir='+str(Path(path)/'.git') in event['args']:
+            return path
+    return None
+
+
+def walk(count=90, foreign=False):
+    f = Fixture(count, foreign=foreign, rejected=count-1)
+    started = time.monotonic()
+    f.env['LAB_DELAY'] = '0.001'
+    result = f.command('get', '--lease', '--no-fetch')
+    elapsed = time.monotonic()-started
+    assert result.returncode == 0, result.stderr
+    events = f.events()
+    candidates = [event for event in events if candidate_path(event, f.paths) is not None]
+    assert candidates, 'empty candidate trace'
+    locked = [event for event in candidates if event['status'] == 'LOCKED']
+    assert bool(locked) == ARGS.base, ('TG1 unexpected candidate lock', locked[:3])
+    visited = []
+    for event in candidates:
+        path = candidate_path(event, f.paths)
+        if 'status' in event['args'] and path not in visited:
+            visited.append(path)
+    if not foreign:
+        assert visited == f.paths, ('walk did not visit ordered candidates',visited)
+        trees = {}
+        for event in candidates:
+            if event.get('tree'):
+                trees[event['tree']] = trees.get(event['tree'], 0)+1
+        assert trees
+        target_tree = git(f.repo, 'rev-parse', 'HEAD^{tree}', output=True)
+        target_calls = trees.get(target_tree, 0)
+        assert target_calls > 0, ('TG3 reset-target listing was not observed', target_tree, trees)
+        if not ARGS.base:
+            assert target_calls <= 1, ('TG3 duplicate reset-target tree listing', target_tree, target_calls)
+        else:
+            assert target_calls >= count-1, ('baseline did not discriminate target-tree bound', target_tree, target_calls)
+        other_trees = {tree:calls for tree,calls in trees.items() if tree != target_tree}
+        record('TG3 ordered candidates='+str(len(visited))+' target tree='+target_tree+' target listings='+str(target_calls)+' other tree counts (diagnostic only)='+repr(other_trees)+' fixture='+str(f.root))
+    else:
+        assert any('rev-list' in e['args'] for e in events), 'foreign final-removal proof unvisited'
+        assert sum('ls-files' in e['args'] for e in candidates) >= 20, 'foreign rejection walk unvisited'
+    record('TG1 '+('foreign' if foreign else 'same-clone')+' candidate calls='+str(len(candidates))+' LOCKED='+str(len(locked))+' log='+str(f.log))
+    record('TGS1 '+('foreign' if foreign else 'same-clone')+' count='+str(count)+' fixed git delay=0.001s elapsed='+str(elapsed))
+
+
+def failed_tree():
+    f=Fixture(21,rejected=20)
+    tree=git(f.repo,'rev-parse','HEAD^{tree}',output=True)
+    f.env['LAB_FAIL_TREE']=tree
+    result=f.command('get','--lease','--no-fetch')
+    assert result.returncode==0 and result.stdout.strip()==f.paths[-1], ('clean ancestor must remain usable after failed content proof',result.stdout,result.stderr)
+    calls=sum(event.get('tree')==tree for event in f.events())
+    expected=20 if ARGS.base else 1
+    assert calls==expected, ('TG3 failed immutable listing repeated',calls,expected)
+    for i,path in enumerate(f.paths[:-1],1):
+        assert (Path(path)/'README').read_text()=='unlanded unique content '+str(i)+'\n'
+    record('TG3 failed immutable tree listing calls='+str(calls)+'; clean ancestor allocated; unlanded contents preserved; fixture='+str(f.root))
+
+
+def progress_rows(stderr):
+    rows = []
+    for line in stderr.splitlines():
+        if 'treehouse: checked ' not in line:
+            continue
+        match = re.fullmatch(r'treehouse: checked (.+): (accepted|refused|skipped): (.+)', line)
+        assert match, ('TG8 invalid progress shape', line)
+        path, decision, reason = match.groups()
+        assert os.path.isabs(path) and reason.strip(), ('TG8 missing copy or reason', line)
+        rows.append((path, decision, reason))
+    paths = [row[0] for row in rows]
+    assert len(paths) == len(set(paths)), ('TG8 repeated candidate identity', rows)
+    return rows
+
+
+def readable(stream):
+    # A gate at the next candidate proves all prior writes have happened. Read
+    # only bytes already available, so a buffering mutant fails without a wait.
+    result = bytearray()
+    os.set_blocking(stream.fileno(), False)
+    try:
+        while True:
+            try:
+                chunk = os.read(stream.fileno(), 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            result.extend(chunk)
+    finally:
+        os.set_blocking(stream.fileno(), True)
+    return result.decode()
+
+
+def initial_allocations():
+    for count in (1, 0):
+        fixture = Fixture(count)
+        if count == 0:
+            (fixture.caller/'treehouse.toml').write_text('max_trees = 1\n')
+        assert all(not entry.get('leased') and not entry.get('owner_pid') for entry in fixture.state())
+        result = fixture.command('get', '--lease', '--no-fetch')
+        expected = str(fixture.pool/'1'/'repo')
+        assert result.returncode == 0 and result.stdout == expected+'\n', ('TG8 initial allocation stdout', count, result.stdout, result.stderr)
+        rows = progress_rows(result.stderr)
+        if count and not ARGS.base:
+            assert len(rows) == 1 and rows[0][0] == expected and rows[0][1] == 'accepted' and 'reusable' in rows[0][2], ('TG8 checked first reuse must report acceptance', rows)
+        else:
+            assert rows == [], ('TG8 empty allocation or baseline emitted progress', count, rows)
+        record('TG8 '+('clean first copy' if count else 'empty pool')+': checked records='+str(len(rows))+' stdout is allocation path only; fixture='+str(fixture.root))
+
+
+def incremental_progress(foreign=False):
+    f = Fixture(21, foreign=foreign, rejected=20)
+    phase = 'foreign' if foreign else 'same-clone'
+    secret = 'fixture-secret-must-not-appear-in-progress'
+    f.env['TREEHOUSE_PROGRESS_SECRET'] = secret
+    f.env['LAB_PROGRESS_PATHS'] = json.dumps(f.paths[1:])
+    server = socket.socket(socket.AF_UNIX)
+    bind_server(server, f)
+    proc = f.start('incremental', 'progress-foreign' if foreign else 'progress')
+    connection = None
+    stderr = ''
+    previous = None
+    try:
+        for k in range(1, 21):
+            connection, _ = server.accept()
+            assert connection.recv(1) == b'H'
+            assert proc.poll() is None, 'TG8 get exited before completion gate'
+            stderr += readable(proc.stderr)
+            assert readable(proc.stdout) == '', 'TG8 stdout changed before allocation'
+            rows = progress_rows(stderr)
+            expected = 0 if ARGS.base else k
+            assert len(rows) == expected, ('TG8 completed-candidate count while held', phase, k, rows)
+            if not ARGS.base:
+                assert [r[0] for r in rows] == f.paths[:k], ('TG8 wrong candidate identity', k, rows)
+                reason = 'safe-removal' if foreign else 'unlanded'
+                assert all(r[1] == 'refused' and reason in r[2] for r in rows), ('TG8 incorrect refusal reason', phase, rows)
+                snapshot = '\n'.join(stderr.splitlines()[-200:])
+                assert snapshot != previous, ('TG8 last-200-lines view did not change', k)
+                previous = snapshot
+            assert secret not in stderr and 'unlanded unique content ' not in stderr, 'TG8 sensitive value in progress'
+            if k in (1, 5, 20):
+                record('TG8 '+phase+' '+('BASE ' if ARGS.base else '')+'k='+str(k)+' readable='+str(len(rows))+' get still held; fixture='+str(f.root))
+            connection.sendall(b'R'); connection.close(); connection = None
+        out, remaining = proc.communicate()
+        stderr += remaining
+        expected_path = str(f.pool/'22'/'repo') if foreign else f.paths[-1]
+        assert proc.returncode == 0 and out == expected_path+'\n', ('TG8 stdout allocation contract', phase, proc.returncode, out, stderr)
+        rows = progress_rows(stderr)
+        if ARGS.base:
+            assert rows == [], rows
+        else:
+            assert len(rows) == 21 and rows[-1][0] == f.paths[-1] and rows[-1][1] == 'accepted', ('TG8 completed-candidate count or acceptance', phase, rows)
+            if foreign:
+                assert 'reclaimed' in rows[-1][2], ('TG8 foreign completion missing', rows)
+                assert git(Path(expected_path),'rev-parse','--path-format=absolute','--git-common-dir',output=True) == git(f.caller,'rev-parse','--path-format=absolute','--git-common-dir',output=True)
+            else:
+                assert 'reusable' in rows[-1][2], rows
+        record('TG8 '+phase+' completed: distinct candidate paths='+str(len(rows))+' stdout is allocation path only; fixture='+str(f.root))
+    finally:
+        if connection is not None:
+            connection.sendall(b'R'); connection.close()
+        server.close()
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate()
+
+    if foreign:
+        for i, path in enumerate(f.paths[:-1], 1):
+            assert (Path(path)/'README').read_text() == 'unlanded unique content '+str(i)+'\n'
+        return
+
+    initial_allocations()
+
+    creation = Fixture(1, rejected=1)
+    (creation.caller/'treehouse.toml').write_text('max_trees = 2\n')
+    result = creation.command('get', '--lease', '--no-fetch')
+    assert result.returncode == 0 and result.stdout == str(creation.pool/'2'/'repo')+'\n', ('TG8 creation after refusal', result.stdout, result.stderr)
+    rows = progress_rows(result.stderr)
+    if ARGS.base:
+        assert rows == [], rows
+    else:
+        assert len(rows) == 1 and rows[0][0] == creation.paths[0] and rows[0][1] == 'refused' and 'unlanded' in rows[0][2], ('TG8 fresh construction was counted as an inspected candidate', rows)
+    assert (Path(creation.paths[0])/'README').read_text() == 'unlanded unique content 1\n'
+    record('TG8 one inspected refusal then fresh creation: no extra checked identity; stdout is new allocation; fixture='+str(creation.root))
+
+    mixed = Fixture(2, foreign=True)
+    git(mixed.repo, 'worktree', 'remove', mixed.paths[1])
+    git(mixed.caller, 'worktree', 'add', '--detach', mixed.paths[1], 'main')
+    (Path(mixed.paths[0])/'README').write_text('preserve deferred foreign work\n')
+    result = mixed.command('get', '--lease', '--no-fetch')
+    assert result.returncode == 0 and result.stdout == mixed.paths[1]+'\n', ('TG8 mixed-clone allocation', result.stdout, result.stderr)
+    rows = progress_rows(result.stderr)
+    if ARGS.base:
+        assert rows == [], rows
+    else:
+        assert [row[0] for row in rows] == mixed.paths and rows[0][1] == 'skipped' and rows[1][1] == 'accepted', ('TG8 deferred foreign skip lost or duplicated', rows)
+    assert (Path(mixed.paths[0])/'README').read_text() == 'preserve deferred foreign work\n'
+    record('TG8 own-clone reuse finishes deferred foreign path as skipped; foreign data preserved; fixture='+str(mixed.root))
+
+    # A newline in a copy alias must not inject a second protocol record. The
+    # real checkout is dirty and preserved; the next copy remains allocatable.
+    escaped = Fixture(2)
+    alias = escaped.root/'copy\nwith-newline'
+    alias.symlink_to(escaped.paths[0], target_is_directory=True)
+    state_path = escaped.pool/'treehouse-state.json'
+    state = json.loads(state_path.read_text())
+    state['worktrees'][0]['path'] = str(alias)
+    state_path.write_text(json.dumps(state))
+    (Path(escaped.paths[0])/'README').write_text('keep recognizable dirty data\n')
+    result = escaped.command('get', '--lease', '--no-fetch')
+    assert result.returncode == 0 and result.stdout == escaped.paths[1]+'\n', ('TG8 escaped-path allocation', result.stdout, result.stderr)
+    rows = progress_rows(result.stderr)
+    if ARGS.base:
+        assert rows == [], rows
+    else:
+        identity = str(alias).replace('\r', '\\r').replace('\n', '\\n')
+        assert len(rows) == 2 and rows[0][0] == identity and rows[0][1] == 'refused' and 'dirty' in rows[0][2], ('TG8 unescaped copy newline', rows)
+        assert rows[1][0] == escaped.paths[1] and rows[1][1] == 'accepted', rows
+    assert (Path(escaped.paths[0])/'README').read_text() == 'keep recognizable dirty data\n'
+    record('TG8 newline copy path escaped; dirty contents retained; fixture='+str(escaped.root))
+
+
+def safety():
+    for risk in ['clean','ancestor','squash','leased','owner','process','tracked','untracked','ignored','unlanded','head-lock','foreign-clean','foreign-ignored']:
+        f = Fixture(1 if risk.startswith('foreign') else 2, foreign=risk.startswith('foreign'))
+        path = Path(f.paths[0]); marker = path / 'README'
+        expected = f.paths[0] if risk in ['clean','ancestor','squash','ignored','foreign-clean'] else (None if risk=='foreign-ignored' else f.paths[1])
+        if risk=='foreign-clean': expected=str(f.pool/'2'/'repo')
+        tenant = None
+        if risk in ['ancestor','squash']:
+            if risk=='squash':
+                marker.write_text('squashed content\n');git(path,'add','README');git(path,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','feature')
+            (f.repo/'README').write_text('squashed content\n' if risk=='squash' else 'advanced base\n')
+            git(f.repo,'add','README');git(f.repo,'commit','-m','landed independently')
+        elif risk=='owner':
+            tenant=subprocess.Popen([BINARY,'get','--no-fetch'],cwd=f.caller,env=dict(f.env,SHELL='/bin/sh'),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            tenant.stdin.write("printf 'OWNER_READY\\n'\nread value\n");tenant.stdin.flush()
+            assert tenant.stdout.readline().strip()=='OWNER_READY'
+            assert f.state()[0].get('owner_pid')==tenant.pid
+        elif risk=='process':
+            tenant=subprocess.Popen([sys.executable,'-c',"import sys; print('TENANT_READY',flush=True); sys.stdin.read()"],cwd=path,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            assert tenant.stdout.readline().strip()=='TENANT_READY'
+        elif risk=='leased':
+            result=f.command('lease','1','--lease-holder','existing lease'); assert result.returncode==0,result.stderr
+        elif risk=='tracked': marker.write_text('recognizable dirty checkout\n')
+        elif risk=='untracked': (path/'notes').write_text('recognizable untracked\n')
+        elif risk in ['ignored','foreign-ignored']: (path/'ignored.log').write_text('recognizable unmanaged ignored\n')
+        elif risk=='unlanded':
+            marker.write_text('recognizable unlanded commit\n');git(path,'add','README');git(path,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','unlanded')
+        elif risk=='head-lock':
+            head=git(path,'rev-parse','--path-format=absolute','--git-path','HEAD',output=True)
+            Path(head+'.lock').write_text('another writer\n')
+        try:
+            result=f.command('get','--lease','--no-fetch')
+            if expected is None:
+                assert result.returncode!=0 and path.exists(), (risk,result.stdout,result.stderr)
+            else:
+                assert result.returncode==0 and result.stdout.strip()==expected, (risk,result.stdout,result.stderr)
+            if risk in ['ignored','foreign-ignored']:
+                assert (path/'ignored.log').read_text()=='recognizable unmanaged ignored\n'
+            if risk=='tracked': assert marker.read_text()=='recognizable dirty checkout\n'
+            if risk=='foreign-clean':
+                assert git(Path(result.stdout.strip()),'rev-parse','--path-format=absolute','--git-common-dir',output=True)==git(f.caller,'rev-parse','--path-format=absolute','--git-common-dir',output=True)
+            rows = progress_rows(result.stderr)
+            if ARGS.base:
+                assert rows == [], ('TG8 baseline unexpectedly reports progress', risk, rows)
+            elif risk in ['clean','ancestor','squash','ignored']:
+                assert len(rows) == 1 and rows[0][0] == f.paths[0] and rows[0][1] == 'accepted' and 'reusable' in rows[0][2], ('TG8 clean first copy acceptance missing', risk, rows)
+            else:
+                expected_paths = [f.paths[0]] + ([expected] if expected and not risk.startswith('foreign') else [])
+                assert [row[0] for row in rows] == expected_paths, ('TG8 safety candidate count/identity', risk, rows)
+                if risk == 'foreign-clean':
+                    assert rows[0][1] == 'accepted' and 'reclaimed' in rows[0][2], ('TG8 foreign completion decision', rows)
+                else:
+                    assert rows[0][1] in ['refused','skipped'], ('TG8 incorrect initial decision', risk, rows)
+                    if risk == 'foreign-ignored':
+                        # Ignored paths are rejected by the backend's safe-removal
+                        # proof, not necessarily its ordinary untracked scan.
+                        assert any(category in rows[0][2] for category in ('ignored','untracked','safe-removal','disposable')), ('TG8 ignored-path reason is unrelated to removal safety', rows)
+                    else:
+                        reason = {'leased':'leased','owner':'owner','process':'process','tracked':'dirty','untracked':'dirty','unlanded':'unlanded','head-lock':'validation'}[risk]
+                        assert reason in rows[0][2], ('TG8 reason disagrees with fixture state', risk, rows)
+                if expected:
+                    assert rows[-1][1] == 'accepted' and rows[-1][2], ('TG8 missing acceptance', risk, rows)
+            record('TG4 '+risk+' expected='+repr(expected)+' observed='+repr(result.stdout.strip())+' fixture='+str(f.root))
+        finally:
+            if tenant is not None:
+                if risk=='owner':
+                    tenant.stdin.write('release\nexit\n');tenant.stdin.flush()
+                    tenant.stdin.close();tenant.stdin=None
+                else:
+                    tenant.kill()
+                tenant.communicate()
+
+
+try:
+    record('mode='+('base' if ARGS.base else 'head')+' binary='+BINARY+' private root='+str(ROOT))
+    if ARGS.only in ['all','same']: walk()
+    if ARGS.only in ['all','foreign']: walk(21, foreign=True)
+    if ARGS.only in ['all','concurrent']:
+        for kind in ['selection','reset','foreign-selection','foreign-remove']:
+            concurrent(kind,2,0)
+        concurrent('selection',3,0)
+        concurrent('selection',8,1)
+        exclusive('selection')
+        exclusive('foreign-selection')
+        unfenced_identity()
+    if ARGS.only in ['all','concurrent','independent-below']:
+        concurrent('selection',2,0,extra_capacity=1)
+    if ARGS.only in ['all','safety']: safety()
+    if ARGS.only in ['all','progress']:
+        incremental_progress(foreign=True)
+        incremental_progress()
+    if ARGS.only == 'first-copy': initial_allocations()
+    if ARGS.only in ['all','second-pass'] and not ARGS.base:
+        second_pass()
+        second_pass(guarded=True)
+    if ARGS.only in ['all','return-fenced'] and not ARGS.base: fenced_return()
+    if ARGS.only in ['all','stale-view'] and not ARGS.base:
+        for foreign in (False, True):
+            stale_view(foreign)
+            stale_view(foreign, held=True)
+        stale_view(alive=True)
+    if ARGS.only in ['all','cache-failure']: failed_tree()
+finally:
+    SOCKET_ROOT.cleanup()
+    if ARGS.evidence:
+        Path(ARGS.evidence).write_text('\n'.join(REPORT)+'\n')

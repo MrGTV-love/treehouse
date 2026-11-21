@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -259,86 +258,95 @@ func TestPruneIgnoredSlotEntryIsSymbolicLink(t *testing.T) {
 	}
 }
 
-// Row 8, second fixture: each source is a link to the OTHER seeded slot file and
-// both slot files hold equal bytes. The reference for what seeding writes now is
-// taken from a fresh real `get` in a second scratch pool whose copy of the
-// fixture has no slot for the links to reach. The slot is pruned only if its
-// entry equals that reference entry in kind and content.
+// Row 8, second fixture: each source is a link to the OTHER seeded slot file,
+// created before `get`, so real seeding writes each link's text and the slot
+// bytes equal what seeding would write now. Equal bytes do not make a source
+// independent: a symbolic source whose target resolves into the slot or the
+// pool must refuse and keep both files. The slot path is learned from a first
+// `get`, that slot is pruned, and the second `get` must reuse the same path.
+// The "outside" control has the same shape with targets outside the slot and
+// pool and must still be pruned, so an always-refuse rule fails here too.
 func TestPruneIgnoredCrossLinkedSources(t *testing.T) {
-	f := newIgnoredFixture(t, map[string]string{"a.ignored": "same\n", "b.ignored": "same\n"}, "a.ignored\nb.ignored\n")
-	slot, poolDir := f.lease()
-	idleAll(t, poolDir)
-	crossLink := func(repo, aTarget, bTarget string) {
-		t.Helper()
-		for name, target := range map[string]string{"a.ignored": aTarget, "b.ignored": bTarget} {
-			path := filepath.Join(repo, name)
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
+	for _, scenario := range []string{"into-slot", "into-pool", "outside"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newIgnoredFixture(t, map[string]string{"a.ignored": "same\n", "b.ignored": "same\n"}, "a.ignored\nb.ignored\n")
+			slot, poolDir := f.lease()
+			idleAll(t, poolDir)
+			f.run(nil, "prune", "--yes")
+			if _, err := os.Lstat(slot); !os.IsNotExist(err) || registrations(t, poolDir) != 0 {
+				t.Fatalf("first slot was not pruned to free its path: %v", err)
 			}
-			if err := os.Symlink(target, path); err != nil {
-				t.Fatal(err)
+			targets := map[string]string{
+				"a.ignored": filepath.Join(slot, "b.ignored"),
+				"b.ignored": filepath.Join(slot, "a.ignored"),
 			}
-		}
-	}
-	crossLink(f.repo, filepath.Join(slot, "b.ignored"), filepath.Join(slot, "a.ignored"))
-
-	// Reference: the same manifest and the IDENTICAL link text, with the first
-	// slot absent. The slot is moved aside while a second scratch pool runs the
-	// real get, so the links dangle exactly as in a copy without the first slot.
-	ref := newIgnoredFixture(t, map[string]string{"a.ignored": "same\n", "b.ignored": "same\n"}, "a.ignored\nb.ignored\n")
-	crossLink(ref.repo, filepath.Join(slot, "b.ignored"), filepath.Join(slot, "a.ignored"))
-	away := slot + ".away"
-	if err := os.Rename(slot, away); err != nil {
-		t.Fatal(err)
-	}
-	refSlot, _ := ref.lease()
-	if err := os.Rename(away, slot); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := os.Readlink(filepath.Join(ref.repo, "a.ignored")); got != filepath.Join(slot, "b.ignored") {
-		t.Fatalf("reference source link text differs from the fixture's: %q", got)
-	}
-	type entry struct {
-		kind    os.FileMode
-		content string
-		exists  bool
-	}
-	read := func(path string) entry {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return entry{}
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, _ := os.Readlink(path)
-			return entry{kind: os.ModeSymlink, content: target, exists: true}
-		}
-		data, _ := os.ReadFile(path)
-		return entry{kind: info.Mode().Type(), content: string(data), exists: true}
-	}
-	wantPrune := true
-	for _, name := range []string{"a.ignored", "b.ignored"} {
-		reference, current := read(filepath.Join(refSlot, name)), read(filepath.Join(slot, name))
-		t.Logf("%s: reference seeding wrote %+v; slot entry is %+v", name, reference, current)
-		if !reference.exists || reference != current {
-			wantPrune = false
-		}
-	}
-
-	dry := f.run(nil, "prune")
-	out := f.run(nil, "prune", "--yes")
-	if wantPrune {
-		if _, err := os.Lstat(slot); !os.IsNotExist(err) || !strings.Contains(out, "Pruned 1 stale worktree") {
-			t.Errorf("slot equal to the reference entry was not pruned: dry=%s execute=%s", dry, out)
-		}
-		return
-	}
-	for _, name := range []string{"a.ignored", "b.ignored"} {
-		if got, err := os.ReadFile(filepath.Join(slot, name)); err != nil || !bytes.Equal(got, []byte("same\n")) {
-			t.Errorf("%s did not survive: %q (%v)", name, got, err)
-		}
-	}
-	if registrations(t, poolDir) != 1 {
-		t.Errorf("refused slot lost its registration: dry=%s execute=%s", dry, out)
+			switch scenario {
+			case "into-pool":
+				targets["a.ignored"] = filepath.Join(poolDir, "treehouse-state.json")
+				targets["b.ignored"] = poolDir
+			case "outside":
+				outside := filepath.Join(f.home, "outside")
+				if err := os.MkdirAll(outside, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"a.ignored", "b.ignored"} {
+					if err := os.WriteFile(filepath.Join(outside, name), []byte("referent\n"), 0o640); err != nil {
+						t.Fatal(err)
+					}
+				}
+				targets["a.ignored"] = filepath.Join(outside, "b.ignored")
+				targets["b.ignored"] = filepath.Join(outside, "a.ignored")
+			}
+			for name, target := range targets {
+				path := filepath.Join(f.repo, name)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if again, _ := f.lease(); again != slot {
+				t.Fatalf("second get used %s, want the freed slot path %s", again, slot)
+			}
+			idleAll(t, poolDir)
+			for name, target := range targets {
+				file := filepath.Join(slot, name)
+				info, err := os.Lstat(file)
+				if err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("seeding did not write a regular file for %s: %v (%v)", name, info, err)
+				}
+				if got, err := os.ReadFile(file); err != nil || string(got) != target {
+					t.Fatalf("%s holds %q, want the equal link text %q (%v)", name, got, target, err)
+				}
+				if _, err := os.Stat(target); err != nil {
+					t.Fatalf("link target of %s must exist: %v", name, err)
+				}
+			}
+			before := pruneFileInventory(t, slot)
+			dry := f.run(nil, "prune")
+			out := f.run(nil, "prune", "--yes")
+			if scenario == "outside" {
+				if _, err := os.Lstat(slot); !os.IsNotExist(err) || !strings.Contains(out, "Pruned 1 stale worktree") || registrations(t, poolDir) != 0 {
+					t.Errorf("equal link text with targets outside the slot and pool was not pruned: dry=%s execute=%s (%v)", dry, out, err)
+				}
+				return
+			}
+			for _, text := range []string{dry, out} {
+				if !strings.Contains(text, pool.PruneSkipIgnoredFiles) || !strings.Contains(text, "link target is inside slot or pool") {
+					t.Errorf("missing link-target refusal: %s", text)
+				}
+			}
+			if strings.Contains(out, "Pruned 1 stale worktree") {
+				t.Errorf("prune removed a slot whose seed sources link into the slot or pool: %s", out)
+			}
+			if after := pruneFileInventory(t, slot); !reflect.DeepEqual(before, after) {
+				t.Errorf("prune lost or changed payload: before=%v after=%v", before, after)
+			}
+			if registrations(t, poolDir) != 1 {
+				t.Errorf("refused slot lost its registration: dry=%s execute=%s", dry, out)
+			}
+		})
 	}
 }
 
@@ -418,6 +426,110 @@ func TestPruneIgnoredModifiedBesideControl(t *testing.T) {
 func readFileOrEmpty(path string) string {
 	data, _ := os.ReadFile(path)
 	return string(data)
+}
+
+// fakeGitSource is a recording git wrapper built as a Go program, so it runs on
+// every platform. It logs each call, fails only the removal judgment's exact
+// ignored-path listing when asked, and passes every other call to the real git.
+const fakeGitSource = `package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+func main() {
+	args := strings.Join(os.Args[1:], " ")
+	log, err := os.OpenFile(os.Getenv("TREEHOUSE_TEST_GIT_LOG"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		os.Exit(125)
+	}
+	defer log.Close()
+	if os.Getenv("TREEHOUSE_TEST_GIT_FAIL") == "1" && strings.HasSuffix(" "+args, " ls-files --others --ignored --exclude-standard -z") {
+		fmt.Fprintln(log, "FAILED "+args)
+		fmt.Fprintln(os.Stderr, "injected ls-files failure")
+		os.Exit(128)
+	}
+	fmt.Fprintln(log, "PASSED "+args)
+	cmd := exec.Command(os.Getenv("TREEHOUSE_TEST_REAL_GIT"), os.Args[1:]...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		os.Exit(125)
+	}
+}
+`
+
+// A failure to run the ignored-path check is a verification failure, not an
+// ignored-path refusal: the real `prune --yes` keeps the slot and its seeded
+// file and reports "cannot verify", never "unsafe ignored files". The control
+// runs the same wrapper with the call passing, and the same slot is pruned.
+func TestPruneIgnoredCheckFailureIsCannotVerify(t *testing.T) {
+	f := newIgnoredFixture(t, map[string]string{"seed.ignored": "original\n"}, "seed.ignored\n")
+	slot, poolDir := f.lease()
+	idleAll(t, poolDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "go.mod"), []byte("module fakegit\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "main.go"), []byte(fakeGitSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(bin, "git")
+	if runtime.GOOS == "windows" {
+		wrapper += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", wrapper, ".")
+	build.Dir = src
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build git wrapper: %v\n%s", err, out)
+	}
+	wrapped := func(fail, log string) []string {
+		return []string{
+			"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"TREEHOUSE_TEST_REAL_GIT=" + realGit,
+			"TREEHOUSE_TEST_GIT_LOG=" + log,
+			"TREEHOUSE_TEST_GIT_FAIL=" + fail,
+		}
+	}
+	const listing = "ls-files --others --ignored --exclude-standard -z"
+
+	failLog := filepath.Join(f.home, "git-fail.log")
+	before := pruneFileInventory(t, slot)
+	out := f.run(wrapped("1", failLog), "prune", "--yes")
+	if !strings.Contains(readFileOrEmpty(failLog), "FAILED -c submodule.recurse=false "+listing) {
+		t.Fatalf("the wrapper never failed the ignored-path listing:\n%s", readFileOrEmpty(failLog))
+	}
+	if !strings.Contains(out, "cannot verify worktree ignored paths") || strings.Contains(out, pool.PruneSkipIgnoredFiles) || strings.Contains(out, "Pruned 1 stale worktree") {
+		t.Errorf("a failed ignored-path check must skip as cannot verify, not as unsafe ignored files: %s", out)
+	}
+	if after := pruneFileInventory(t, slot); !reflect.DeepEqual(before, after) {
+		t.Errorf("prune lost or changed payload: before=%v after=%v", before, after)
+	}
+	if got, err := os.ReadFile(filepath.Join(slot, "seed.ignored")); err != nil || string(got) != "original\n" {
+		t.Errorf("seeded file did not survive: %q (%v)", got, err)
+	}
+	if registrations(t, poolDir) != 1 {
+		t.Errorf("skipped slot lost its registration")
+	}
+
+	passLog := filepath.Join(f.home, "git-pass.log")
+	out = f.run(wrapped("0", passLog), "prune", "--yes")
+	if log := readFileOrEmpty(passLog); !strings.Contains(log, "PASSED -c submodule.recurse=false "+listing) || strings.Contains(log, "FAILED") {
+		t.Fatalf("the control did not pass the ignored-path listing through the wrapper:\n%s", log)
+	}
+	if _, err := os.Lstat(slot); !os.IsNotExist(err) || !strings.Contains(out, "Pruned 1 stale worktree") || registrations(t, poolDir) != 0 {
+		t.Errorf("control with the listing passing did not prune the unchanged slot: %s (%v)", out, err)
+	}
 }
 
 // N3 control: a source that is a symbolic link with an ABSOLUTE target outside

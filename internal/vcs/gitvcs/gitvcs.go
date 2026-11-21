@@ -720,6 +720,7 @@ func requireNoWorktreeOperation(gitDir string) error {
 // IgnoredPathRefusal is the removal judgment's refusal for an ignored path that
 // is not provably regenerable. Error() keeps the full historical text; Reason
 // is the stable category-level wording and Detail names the path (and any cause).
+// A failure to run the inspection itself is a plain error, not a refusal.
 type IgnoredPathRefusal struct {
 	Reason string
 	Detail string
@@ -759,7 +760,7 @@ func requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir string, 
 	}
 	ignored, err := runGitRaw(worktreePath, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
 	if err != nil {
-		return &IgnoredPathRefusal{Reason: "cannot verify worktree ignored paths", Cause: err}
+		return fmt.Errorf("cannot verify worktree ignored paths: %w", err)
 	}
 	known := make(map[string]struct{}, len(seededPaths))
 	for _, name := range seededPaths {
@@ -776,21 +777,21 @@ func requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir string, 
 		// still disposable. The current owner checkout must retain equal bytes.
 		source, err := os.OpenRoot(repoRoot)
 		if err != nil {
-			return &IgnoredPathRefusal{Reason: "cannot verify seeded ignored path", Detail: ignoredPaths[0], Cause: err}
+			return fmt.Errorf("cannot open seed source checkout: %w", err)
 		}
 		defer source.Close()
 		destination, err := os.OpenRoot(worktreePath)
 		if err != nil {
-			return &IgnoredPathRefusal{Reason: "cannot verify seeded ignored path", Detail: ignoredPaths[0], Cause: err}
+			return fmt.Errorf("cannot open worktree for seed comparison: %w", err)
 		}
 		defer destination.Close()
 		slotBoundary, err := physicalPath(worktreePath)
 		if err != nil {
-			return &IgnoredPathRefusal{Reason: "cannot verify seeded source boundary", Cause: err}
+			return fmt.Errorf("cannot verify seeded source boundary: %w", err)
 		}
 		poolBoundary, err := physicalPath(poolDir)
 		if err != nil {
-			return &IgnoredPathRefusal{Reason: "cannot verify seeded source boundary", Cause: err}
+			return fmt.Errorf("cannot verify seeded source boundary: %w", err)
 		}
 		var sourceBuffer, destinationBuffer [32 * 1024]byte
 		for _, name := range ignoredPaths {
@@ -872,7 +873,9 @@ func openRegularSeedFile(root *os.Root, name string) (*os.File, os.FileInfo, err
 // equalSeedFiles compares what real seeding would write now, not what a
 // symbolic source happens to reference. Seeding materializes link target text
 // as a regular file. Parent links are resolved and authenticated separately so
-// neither a source inside the pool nor a same-inode alias proves independence.
+// neither a source inside the pool nor a same-inode alias proves independence;
+// a symbolic source whose target resolves into the slot or pool is not
+// independent either, although only its link text is compared.
 func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBoundary string, sourceBuffer, destinationBuffer []byte) (bool, error) {
 	if !filepath.IsLocal(name) {
 		return false, fmt.Errorf("seed path is not local: %s", name)
@@ -881,17 +884,25 @@ func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBounda
 	if err != nil {
 		return false, err
 	}
-	for _, boundary := range []string{slotBoundary, poolBoundary} {
-		if !strings.EqualFold(filepath.VolumeName(boundary), filepath.VolumeName(parentPath)) {
-			continue // Physical paths on distinct volumes cannot overlap.
+	insideSlotOrPool := func(physical string) (bool, error) {
+		for _, boundary := range []string{slotBoundary, poolBoundary} {
+			if !strings.EqualFold(filepath.VolumeName(boundary), filepath.VolumeName(physical)) {
+				continue // Physical paths on distinct volumes cannot overlap.
+			}
+			rel, err := filepath.Rel(boundary, physical)
+			if err != nil {
+				return false, err
+			}
+			if rel == "." || filepath.IsLocal(rel) {
+				return true, nil
+			}
 		}
-		rel, err := filepath.Rel(boundary, parentPath)
-		if err != nil {
-			return false, err
-		}
-		if rel == "." || filepath.IsLocal(rel) {
-			return false, fmt.Errorf("seed source is inside slot or pool: %s", name)
-		}
+		return false, nil
+	}
+	if inside, err := insideSlotOrPool(parentPath); err != nil {
+		return false, err
+	} else if inside {
+		return false, fmt.Errorf("seed source is inside slot or pool: %s", name)
 	}
 	parent, err := source.OpenRoot(filepath.Dir(name))
 	if err != nil {
@@ -957,6 +968,15 @@ func equalSeedFiles(source, destination *os.Root, name, slotBoundary, poolBounda
 		after, err := parent.Lstat(base)
 		if err != nil || !os.SameFile(aInfo, after) {
 			return false, fmt.Errorf("seed source link changed: %s", name)
+		}
+		targetPath, err := physicalPath(filepath.Join(parentPath, base))
+		if err != nil {
+			return false, fmt.Errorf("cannot resolve seed source link target: %s: %w", name, err)
+		}
+		if inside, err := insideSlotOrPool(targetPath); err != nil {
+			return false, err
+		} else if inside {
+			return false, fmt.Errorf("seed source link target is inside slot or pool: %s", name)
 		}
 		if int64(len(target)) != bInfo.Size() {
 			return false, nil

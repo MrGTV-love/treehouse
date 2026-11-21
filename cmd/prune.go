@@ -34,12 +34,15 @@ already merged into the default branch. Git slots also refuse ignored files
 unless each is an authenticated seed matching what current seeding would write:
 regular-file bytes, including link-target text for a symbolic source. The source
 must lie outside the slot and pool after resolving parent links and must not
-share the slot file's inode; mode alone is not compared.
+share the slot file's inode; a symbolic-link source whose target lies in the
+slot or the pool is not independent; mode alone is not compared.
 This is checked during planning and again
 before deletion; concurrent writes after the last check are not protected.
 Git slots with replacement refs, locked or modules metadata, or an initialized
 submodule are also skipped, as foreign-slot reclamation skips them; a slot refused
 for an ignored path is listed under "unsafe ignored files" with the path shown.
+A failure to run the check itself keeps the slot and is reported as "cannot
+verify worktree", not as "unsafe ignored files".
 The ignored-file judgment does not cover jj slots or opted-in missing-repository
 orphans.
 

@@ -37,6 +37,9 @@ type PruneSkipped struct {
 	Reason string
 	// Detail carries raw diagnostics intended for verbose output.
 	Detail string
+	// Paths lists every refused path when a refusal names more than one;
+	// Detail then holds the same paths joined.
+	Paths []string
 }
 
 // PruneResult describes dry-run candidates, removed worktrees, skipped worktrees,
@@ -764,7 +767,9 @@ func removalJudgmentSkipped(wt WorktreeEntry, err error) PruneSkipped {
 			}
 			detail += ignored.Cause.Error()
 		}
-		return newPruneSkipped(wt.Name, wt.Path, PruneSkipIgnoredFiles, ignored.Reason, detail)
+		skipped := newPruneSkipped(wt.Name, wt.Path, PruneSkipIgnoredFiles, ignored.Reason, detail)
+		skipped.Paths = ignored.Paths
+		return skipped
 	}
 	return newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotVerify, err.Error(), "")
 }

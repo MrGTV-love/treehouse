@@ -159,7 +159,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 - **Dirty detection** - treehouse treats tracked changes and untracked files as dirty, even when repository config hides untracked files from normal `git status` output.
 - **Safe pruning** - By default, `treehouse prune` removes only clean, idle managed worktrees with landed HEAD commits and, for Git slots, provably regenerable ignored files. See [Pruning stale worktrees and orphans](#pruning-stale-worktrees-and-orphans) for the ignored-file rule and [Base branch](#base-branch) for the merge rule.
   `treehouse prune --all` applies the same safety checks across every managed pool under the user-level treehouse root.
-  Backing-repository-missing orphans are reported by default; `--prune-orphans` includes them as unverified prune candidates, and `--yes` is required before deletion.
+  Backing-repository-missing orphans are reported by default; `--prune-orphans` includes them as unverified prune candidates, and `--yes` is required before deletion. A Git orphan is deleted only when it holds nothing but its `.git` marker; any other Git orphan is kept and listed with its paths.
   It is a dry run unless you pass `--yes`.
 - **Self-healing get** - `treehouse get` clears stale git worktree bookkeeping for the exact path it is about to create (e.g. left behind by a crashed or forcibly removed worktree), so a prunable registration never wedges the pool with a "missing but already registered worktree" error. Registrations for other paths are never touched, so a live worktree that the caller cannot see (for example under another account's private pool root) is never deregistered.
 
@@ -213,7 +213,7 @@ You can instead keep the pool [inside the project](#in-project-storage) with `--
 | `prune`   | `--yes`   | Delete listed prune candidates instead of doing a dry run |
 | `prune`   | `--all`   | Sweep every managed pool under the user-level treehouse root |
 | `prune`   | `--global` | Alias for `--all` |
-| `prune`   | `--prune-orphans` | Include backing-repository-missing orphans in prune candidates |
+| `prune`   | `--prune-orphans` | Include backing-repository-missing orphans in prune candidates; a Git orphan holding anything but its `.git` marker is kept and listed |
 | `prune`   | `--verbose`, `-v` | Show detailed skip diagnostics |
 | `destroy` | `--all`   | Remove all worktrees in the named pool (requires a pool path) |
 | `destroy` | `--yes`   | Execute the removal instead of doing a dry run |
@@ -486,9 +486,9 @@ Without `origin`, prune checks the local default branch ref first.
 If `origin` cannot be reached, prune reports `origin unreachable (cannot verify)` and leaves the worktree untouched, even when `--prune-orphans` is set.
 If a linked worktree points at a missing backing repository, prune reports `orphaned (backing repository missing)`.
 Plain `treehouse prune` and `treehouse prune --all` never delete those orphans.
-Pass `--prune-orphans` to include true backing-repository-missing orphans in the dry run, then add `--yes` to delete them.
+Pass `--prune-orphans` to include true backing-repository-missing orphans in the dry run, then add `--yes` to delete them. Only a Git orphan that holds nothing but its `.git` marker is deleted; other Git orphans are kept and listed with their paths.
 Treehouse cannot verify orphan contents after the backing version-control metadata is gone, so each orphan candidate is marked `content could not be verified`.
-A Git orphan is still refused, at planning and at the final pre-delete check, when it holds any file other than its `.git` marker. With the index and the repository's exclude rules gone, Treehouse cannot tell an ignored file from an untracked or committed one, and no seed source exists to compare against. The refusal is listed under `unsafe ignored files` as `orphan has untracked or ignored paths (no seed source to compare)`, and every such path is printed on the `detail:` line. Move or delete the files you do not need, then prune again; an orphan holding only empty directories is pruned.
+A Git orphan is still refused, at planning and at the final pre-delete check, when it holds any file other than its `.git` marker. With the index and the repository's exclude rules gone, Treehouse cannot tell an ignored file from an untracked or committed one, and no seed source exists to compare against. The refusal is listed under `unsafe ignored files` as `orphan has untracked or ignored paths (no seed source to compare)`, and its paths are printed on the `detail:` line: the first 10, then `and N more (use --verbose to list all)`; `--verbose` prints every path. Control characters in a printed path (such as CR, LF or ESC) are shown escaped. Move or delete the files you do not need, then prune again; an orphan holding only empty directories is pruned.
 Use `--verbose` to show the underlying version-control diagnostic details for skipped worktrees.
 
 ### Destroying worktrees

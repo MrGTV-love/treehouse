@@ -742,7 +742,9 @@ func requireNoWorktreeOperation(gitDir string) error {
 type IgnoredPathRefusal struct {
 	Reason string
 	Detail string
-	Cause  error
+	// Paths lists every refused path when a refusal names more than one.
+	Paths []string
+	Cause error
 }
 
 func (e *IgnoredPathRefusal) Error() string {
@@ -874,7 +876,7 @@ func RequireOrphanRemovalAllowed(worktreePath string) error {
 		return fmt.Errorf("cannot verify orphan worktree paths: %w", err)
 	}
 	if paths := recoveryNUL(listed); len(paths) != 0 {
-		return &IgnoredPathRefusal{Reason: "orphan has untracked or ignored paths (no seed source to compare)", Detail: strings.Join(paths, ", ")}
+		return &IgnoredPathRefusal{Reason: "orphan has untracked or ignored paths (no seed source to compare)", Detail: strings.Join(paths, ", "), Paths: paths}
 	}
 	return nil
 }

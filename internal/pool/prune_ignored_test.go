@@ -136,8 +136,8 @@ func TestPruneFinalCheckPreservesIgnoredFiles(t *testing.T) {
 	}
 }
 
-func TestPruneOrphansPreservesIgnoredFiles(t *testing.T) {
-	for _, scenario := range []string{"clean", "unseeded", "late-unseeded", "seeded"} {
+func TestPruneOrphansRefusesAnyUnverifiablePath(t *testing.T) {
+	for _, scenario := range []string{"clean", "info-exclude", "untracked-and-ignored", "late"} {
 		t.Run(scenario, func(t *testing.T) {
 			repo, poolDir := setupRepo(t)
 			t.Setenv("HOME", t.TempDir())
@@ -149,28 +149,31 @@ func TestPruneOrphansPreservesIgnoredFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			write(filepath.Join(repo, ".gitignore"), "*.local\n")
-			if scenario == "seeded" {
-				write(filepath.Join(repo, ".worktreeinclude"), "seed.local\n")
-				write(filepath.Join(repo, "seed.local"), "seed\n")
-			}
-			runGit(t, repo, "add", ".")
-			runGit(t, repo, "commit", "-m", "ignored fixture")
-			runGit(t, repo, "push", "origin", "main")
+			runGit(t, repo, "rm", "--quiet", "README.md")
+			runGit(t, repo, "commit", "--quiet", "-m", "empty tree")
+			runGit(t, repo, "push", "--quiet", "origin", "main")
+			write(filepath.Join(repo, ".git", "info", "exclude"), ".env.local\n")
 			slot, err := Acquire(repo, poolDir, 1, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			clearOwnerReservation(t, poolDir, slot)
-			file := filepath.Join(slot, ".env.local")
+			files := map[string]string{}
 			var hooks []string
 			switch scenario {
-			case "unseeded":
-				write(file, "unique\n")
-			case "late-unseeded":
-				hooks = []string{"echo unique > " + quoteForShell(file)}
-			case "seeded":
-				file = filepath.Join(slot, "seed.local")
+			case "info-exclude":
+				files[".env.local"] = "unique secret\n"
+			case "untracked-and-ignored":
+				files[".env.local"] = "unique secret\n"
+				files[filepath.Join("notes", "todo.txt")] = "unique notes\n"
+			case "late":
+				hooks = []string{"echo unique > " + quoteForShell(filepath.Join(slot, ".env.local"))}
+			}
+			for name, content := range files {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(slot, name)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write(filepath.Join(slot, name), content)
 			}
 			if err := os.RemoveAll(repo); err != nil {
 				t.Fatal(err)
@@ -194,20 +197,32 @@ func TestPruneOrphansPreservesIgnoredFiles(t *testing.T) {
 				return
 			}
 			if len(result.Result.Pruned) != 0 || len(result.Result.Skipped) != 1 || result.Result.Skipped[0].Category != PruneSkipIgnoredFiles {
-				t.Fatalf("orphan holding an ignored file was not refused: %+v", result.Result)
+				t.Fatalf("orphan holding unverifiable paths was not refused: %+v", result.Result)
 			}
-			if !strings.Contains(result.Result.Skipped[0].Detail, filepath.Base(file)) {
-				t.Errorf("refusal does not name the ignored path: %+v", result.Result.Skipped[0])
+			skip := result.Result.Skipped[0]
+			if strings.Contains(skip.Reason, "unseeded") || !strings.Contains(skip.Reason, "orphan") {
+				t.Errorf("refusal reason is not orphan-specific: %q", skip.Reason)
 			}
-			if _, err := os.Stat(file); err != nil {
-				t.Errorf("ignored file did not survive: %v", err)
+			if scenario == "late" {
+				files[".env.local"] = "unique\n"
+			}
+			for name, content := range files {
+				if !strings.Contains(skip.Detail, filepath.ToSlash(name)) {
+					t.Errorf("refusal does not name %s: %+v", name, skip)
+				}
+				data, err := os.ReadFile(filepath.Join(slot, name))
+				if err != nil || strings.TrimSpace(string(data)) != strings.TrimSpace(content) {
+					t.Errorf("%s did not survive: %q (%v)", name, data, err)
+				}
 			}
 			after, err := ReadState(poolDir)
 			if err != nil || !reflect.DeepEqual(before, after) {
 				t.Errorf("refusal changed registration or leaked reservation: before=%+v after=%+v (%v)", before, after, err)
 			}
-			if err := os.Remove(file); err != nil {
-				t.Fatal(err)
+			for name := range files {
+				if err := os.Remove(filepath.Join(slot, name)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			retry, err := PruneAllWithOptions(filepath.Dir(poolDir), PruneOptions{PruneOrphans: true})
 			if err != nil || len(retry.Result.Pruned) != 1 || len(retry.Result.Skipped) != 0 {

@@ -449,13 +449,13 @@ func RequireCleanRemovalAllowed(repoRoot, poolDir, path string, seededPaths []st
 	return gitvcs.RequireCleanRemovalAllowed(repoRoot, poolDir, path, seededPaths)
 }
 
-// RequireOrphanRemovalAllowed applies the same ignored-path judgment to a Git
-// worktree whose backing repository is missing. jj behavior is unchanged.
-func RequireOrphanRemovalAllowed(poolDir, path string) error {
+// RequireOrphanRemovalAllowed applies Git's removal judgment for a worktree
+// whose backing repository is missing. jj behavior is unchanged.
+func RequireOrphanRemovalAllowed(path string) error {
 	if WorktreeBackendName(path) != "git" {
 		return nil
 	}
-	return gitvcs.RequireOrphanRemovalAllowed(poolDir, path)
+	return gitvcs.RequireOrphanRemovalAllowed(path)
 }
 
 // IgnoredPathRefusal reports an ignored path that is not provably regenerable.

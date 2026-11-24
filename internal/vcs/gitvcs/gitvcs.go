@@ -780,45 +780,6 @@ func requireCleanRemovalAllowed(repoRoot, poolDir, worktreePath, gitDir string, 
 	if err != nil {
 		return fmt.Errorf("cannot verify worktree ignored paths: %w", err)
 	}
-	if err := requireIgnoredPathsRegenerable(repoRoot, poolDir, worktreePath, ignored, seededPaths); err != nil {
-		return err
-	}
-	for _, marker := range []string{"locked", "modules"} {
-		_, err := os.Lstat(filepath.Join(gitDir, marker))
-		if err == nil {
-			return fmt.Errorf("worktree has removal-protected metadata (%s)", marker)
-		}
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("cannot verify worktree removal metadata (%s): %w", marker, err)
-		}
-	}
-	stages, err := runGitRaw(worktreePath, "ls-files", "--stage", "-z")
-	if err != nil {
-		return fmt.Errorf("cannot verify worktree submodules: %w", err)
-	}
-	for _, entry := range recoveryNUL(stages) {
-		if !strings.HasPrefix(entry, "160000 ") {
-			continue
-		}
-		_, name, ok := strings.Cut(entry, "\t")
-		if !ok {
-			return fmt.Errorf("cannot verify worktree submodule entry")
-		}
-		_, err := os.Lstat(filepath.Join(worktreePath, filepath.FromSlash(name), ".git"))
-		if err == nil {
-			return fmt.Errorf("worktree has an initialized submodule (%s)", name)
-		}
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("cannot verify worktree submodule (%s): %w", name, err)
-		}
-	}
-	return nil
-}
-
-// requireIgnoredPathsRegenerable is the ignored-path part of the removal
-// judgment: every listed ignored path must be an authenticated seed whose
-// entry equals what current seeding from repoRoot would write.
-func requireIgnoredPathsRegenerable(repoRoot, poolDir, worktreePath string, ignored []byte, seededPaths []string) error {
 	known := make(map[string]struct{}, len(seededPaths))
 	for _, name := range seededPaths {
 		known[name] = struct{}{}
@@ -861,29 +822,61 @@ func requireIgnoredPathsRegenerable(repoRoot, poolDir, worktreePath string, igno
 			}
 		}
 	}
+	for _, marker := range []string{"locked", "modules"} {
+		_, err := os.Lstat(filepath.Join(gitDir, marker))
+		if err == nil {
+			return fmt.Errorf("worktree has removal-protected metadata (%s)", marker)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot verify worktree removal metadata (%s): %w", marker, err)
+		}
+	}
+	stages, err := runGitRaw(worktreePath, "ls-files", "--stage", "-z")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree submodules: %w", err)
+	}
+	for _, entry := range recoveryNUL(stages) {
+		if !strings.HasPrefix(entry, "160000 ") {
+			continue
+		}
+		_, name, ok := strings.Cut(entry, "\t")
+		if !ok {
+			return fmt.Errorf("cannot verify worktree submodule entry")
+		}
+		_, err := os.Lstat(filepath.Join(worktreePath, filepath.FromSlash(name), ".git"))
+		if err == nil {
+			return fmt.Errorf("worktree has an initialized submodule (%s)", name)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot verify worktree submodule (%s): %w", name, err)
+		}
+	}
 	return nil
 }
 
-// RequireOrphanRemovalAllowed applies the ignored-path part of the removal
-// judgment to a linked worktree whose backing repository is missing. Its
-// ignore rules are read from the worktree's own .gitignore files and the
-// user's global excludes through an empty scratch repository, so a committed
-// file matching an ignore rule also counts. With no owning checkout no seed
-// source exists, so no path is authorized and any ignored path refuses.
-func RequireOrphanRemovalAllowed(poolDir, worktreePath string) error {
+// RequireOrphanRemovalAllowed is the removal judgment for a linked worktree
+// whose backing repository is missing. With its index and the repository's
+// exclude rules gone, an ignored file cannot be told from an untracked one,
+// and no seed source exists to compare against, so every path other than the
+// .git marker refuses removal. Paths are listed through an empty scratch
+// repository with no exclude rules applied.
+func RequireOrphanRemovalAllowed(worktreePath string) error {
 	scratch, err := os.MkdirTemp("", "treehouse-orphan-")
 	if err != nil {
-		return fmt.Errorf("cannot verify worktree ignored paths: %w", err)
+		return fmt.Errorf("cannot verify orphan worktree paths: %w", err)
 	}
 	defer os.RemoveAll(scratch)
 	if _, err := runGitRaw("", "init", "--bare", "--quiet", scratch); err != nil {
-		return fmt.Errorf("cannot verify worktree ignored paths: %w", err)
+		return fmt.Errorf("cannot verify orphan worktree paths: %w", err)
 	}
-	ignored, err := runGitRaw(worktreePath, "--git-dir="+scratch, "--work-tree="+worktreePath, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	listed, err := runGitRaw(worktreePath, "--git-dir="+scratch, "--work-tree="+worktreePath, "ls-files", "--others", "-z")
 	if err != nil {
-		return fmt.Errorf("cannot verify worktree ignored paths: %w", err)
+		return fmt.Errorf("cannot verify orphan worktree paths: %w", err)
 	}
-	return requireIgnoredPathsRegenerable("", poolDir, worktreePath, ignored, nil)
+	if paths := recoveryNUL(listed); len(paths) != 0 {
+		return &IgnoredPathRefusal{Reason: "orphan has untracked or ignored paths (no seed source to compare)", Detail: strings.Join(paths, ", ")}
+	}
+	return nil
 }
 
 // openRegularSeedFile refuses symlinks, including ancestors, and authenticates

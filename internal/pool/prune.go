@@ -650,7 +650,7 @@ func finalOrphanPruneSafetyCheck(poolDir string, wt WorktreeEntry) (PruneWorktre
 		return worktree, newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "cannot measure size", err.Error())
 	}
 	worktree.Bytes = bytes
-	if err := vcs.RequireOrphanRemovalAllowed(poolDir, worktree.Path); err != nil {
+	if err := vcs.RequireOrphanRemovalAllowed(worktree.Path); err != nil {
 		return worktree, removalJudgmentSkipped(wt, err)
 	}
 	return worktree, skipped
@@ -683,7 +683,7 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 			return worktree, skipped, true, pruneContext{}, nil
 		}
 		worktree.Bytes = bytes
-		if err := vcs.RequireOrphanRemovalAllowed(poolDir, worktree.Path); err != nil {
+		if err := vcs.RequireOrphanRemovalAllowed(worktree.Path); err != nil {
 			return worktree, removalJudgmentSkipped(wt, err), true, pruneContext{}, nil
 		}
 		worktree.Orphaned = true

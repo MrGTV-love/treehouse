@@ -2443,6 +2443,9 @@ func TestPruneAllReportsOrphanWithoutRawGitErrorsAndPrunesOnlyWithExplicitFlag(t
 	if err := os.RemoveAll(repoDir); err != nil {
 		t.Fatalf("RemoveAll repo failed: %v", err)
 	}
+	if err := os.Remove(filepath.Join(wtPath, "README.md")); err != nil {
+		t.Fatal(err)
+	}
 
 	outsideDir := t.TempDir()
 	pruneOut, pruneErr, code := runTreehouseFromDir(t, repoDir, outsideDir, homeDir, nil, "prune", "--all")
@@ -2479,6 +2482,44 @@ func TestPruneAllReportsOrphanWithoutRawGitErrorsAndPrunesOnlyWithExplicitFlag(t
 	}
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Fatalf("expected orphan to be removed after explicit prune, stat err: %v", err)
+	}
+}
+
+func TestPruneOrphansRefusesFileIgnoredOnlyByDeletedInfoExclude(t *testing.T) {
+	repoDir, homeDir := setupTestRepo(t)
+	env := []string{"SHELL=" + exitShellBin}
+	if err := os.WriteFile(filepath.Join(repoDir, ".git", "info", "exclude"), []byte(".env.local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, getErr, code := runTreehouse(t, repoDir, homeDir, env, "get")
+	if code != 0 {
+		t.Fatalf("get failed (code %d): %s", code, getErr)
+	}
+	wtPath := extractWorktreePath(getErr, homeDir)
+	if wtPath == "" {
+		t.Fatal("could not extract worktree path")
+	}
+	secret := filepath.Join(wtPath, ".env.local")
+	const unique = "unique secret bytes\n"
+	if err := os.WriteFile(secret, []byte(unique), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(repoDir); err != nil {
+		t.Fatalf("RemoveAll repo failed: %v", err)
+	}
+
+	outsideDir := t.TempDir()
+	pruneOut, pruneErr, code := runTreehouseFromDir(t, repoDir, outsideDir, homeDir, nil, "prune", "--all", "--prune-orphans", "--yes")
+	if code != 0 {
+		t.Fatalf("prune --all --prune-orphans --yes failed (code %d): %s", code, pruneErr)
+	}
+	if strings.Contains(pruneOut, "Pruned") || !strings.Contains(pruneOut, "orphan has untracked or ignored paths") || !strings.Contains(pruneOut, ".env.local") {
+		t.Fatalf("expected orphan refusal naming .env.local, got stdout:\n%s\nstderr:\n%s", pruneOut, pruneErr)
+	}
+	data, err := os.ReadFile(secret)
+	if err != nil || string(data) != unique {
+		t.Fatalf("ignored file did not survive orphan prune: %q (%v)", data, err)
 	}
 }
 

@@ -488,7 +488,7 @@ If a linked worktree points at a missing backing repository, prune reports `orph
 Plain `treehouse prune` and `treehouse prune --all` never delete those orphans.
 Pass `--prune-orphans` to include true backing-repository-missing orphans in the dry run, then add `--yes` to delete them.
 Treehouse cannot verify orphan contents after the backing version-control metadata is gone, so each orphan candidate is marked `content could not be verified`.
-A Git orphan is still refused, at planning and at the final pre-delete check, when it holds an ignored file, and the path is listed under `unsafe ignored files`. With the repository gone, its ignore rules come from the slot's own `.gitignore` files and your global excludes, so a committed file that matches an ignore rule also keeps the orphan. No seed source exists, so a seeded file also keeps the orphan.
+A Git orphan is still refused, at planning and at the final pre-delete check, when it holds any file other than its `.git` marker. With the index and the repository's exclude rules gone, Treehouse cannot tell an ignored file from an untracked or committed one, and no seed source exists to compare against. The refusal is listed under `unsafe ignored files` as `orphan has untracked or ignored paths (no seed source to compare)`, and every such path is printed on the `detail:` line. Move or delete the files you do not need, then prune again; an orphan holding only empty directories is pruned.
 Use `--verbose` to show the underlying version-control diagnostic details for skipped worktrees.
 
 ### Destroying worktrees

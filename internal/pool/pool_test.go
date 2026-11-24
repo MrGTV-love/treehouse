@@ -2676,6 +2676,9 @@ func TestPruneAllPrunesBackingMissingOrphanOnlyWithExplicitFlag(t *testing.T) {
 	if err := os.RemoveAll(repoDir); err != nil {
 		t.Fatalf("RemoveAll repo failed: %v", err)
 	}
+	if err := os.Remove(filepath.Join(wtPath, "README.md")); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := PruneAllWithOptions(filepath.Dir(poolDir), PruneOptions{
 		DryRun:       true,

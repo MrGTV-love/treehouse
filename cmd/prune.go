@@ -44,9 +44,9 @@ for an ignored path is listed under "unsafe ignored files" with the path shown.
 A failure to run the check itself keeps the slot and is reported as "cannot
 verify worktree", not as "unsafe ignored files".
 The ignored-file judgment does not cover jj slots. A Git orphan included by
---prune-orphans is refused when it holds any ignored file, seeded or not, judged
-by the slot's own .gitignore files and global excludes (a committed file that
-matches them also counts).
+--prune-orphans is refused, with every path named, when it holds any file other
+than its .git marker: with the index and the repository's excludes gone, an
+ignored file cannot be told from an untracked or committed one.
 
 Prune is a dry run by default. Pass --yes to delete the listed candidates.
 Backing-repository-missing orphans are reported by default. Pass --prune-orphans

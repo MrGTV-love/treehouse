@@ -258,16 +258,16 @@ func printPruneSkipped(w io.Writer, skipped []pool.PruneSkipped, verbose bool) {
 	fmt.Fprintf(w, "🌳 Skipped %d unsafe idle %s:\n", len(skipped), plural("worktree", len(skipped)))
 	for _, category := range orderedPruneSkipCategories(skipped) {
 		group := pruneSkipGroup(skipped, category)
-		fmt.Fprintf(w, "  %s:\n", category)
+		fmt.Fprintf(w, "  %s:\n", escapePruneDetail(category))
 		reasonWidth := 0
 		for _, wt := range group {
-			if pruneSkipShowsReason(wt) && len(wt.Reason) > reasonWidth {
-				reasonWidth = len(wt.Reason)
+			if reason := escapePruneDetail(wt.Reason); pruneSkipShowsReason(wt) && len(reason) > reasonWidth {
+				reasonWidth = len(reason)
 			}
 		}
 		for _, wt := range group {
 			if pruneSkipShowsReason(wt) {
-				fmt.Fprintf(w, "  %-4s  %-*s  %s\n", wt.Name, reasonWidth, wt.Reason, ui.PrettyPath(wt.Path))
+				fmt.Fprintf(w, "  %-4s  %-*s  %s\n", wt.Name, reasonWidth, escapePruneDetail(wt.Reason), ui.PrettyPath(wt.Path))
 			} else {
 				fmt.Fprintf(w, "  %-4s  %s\n", wt.Name, ui.PrettyPath(wt.Path))
 			}
@@ -299,8 +299,8 @@ func printPruneSkipDetail(w io.Writer, wt pool.PruneSkipped, verbose bool) {
 	}
 }
 
-// escapePruneDetail keeps paths from checkout contents on one line and stops
-// them from sending terminal control sequences.
+// escapePruneDetail keeps skip text that can hold checkout path names on one
+// line and stops it from sending terminal control sequences.
 func escapePruneDetail(text string) string {
 	var b strings.Builder
 	for i := 0; i < len(text); {

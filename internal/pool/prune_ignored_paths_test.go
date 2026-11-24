@@ -309,6 +309,10 @@ func TestPruneSeedSourceInsidePoolIsRefused(t *testing.T) {
 	if len(result.Pruned) != 0 {
 		t.Fatalf("slot whose seed source lies inside the pool was pruned: %+v", result)
 	}
+	if len(result.Skipped) != 1 || result.Skipped[0].Path != slot || result.Skipped[0].Category != PruneSkipIgnoredFiles ||
+		!strings.Contains(result.Skipped[0].Reason+" "+result.Skipped[0].Detail, "seed source is inside slot or pool") {
+		t.Fatalf("slot was not refused by the seed-source-inside-slot-or-pool rule: %+v", result.Skipped)
+	}
 	assertFileContents(t, file, "original\n")
 	state, err := ReadState(poolDir)
 	if err != nil {

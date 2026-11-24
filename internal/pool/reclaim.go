@@ -129,7 +129,7 @@ func reclaimForeignWorktree(repoRoot, poolDir string, poolSize, firstSlot int, s
 				return nil
 			}
 			acquisitionStage("foreign-validated", wt.Path)
-			err = vcs.RemoveLandedWorktree(ownerRoot, wt.Path, wt.SeededPaths, func() error {
+			err = vcs.RemoveLandedWorktree(ownerRoot, poolDir, wt.Path, wt.SeededPaths, func() error {
 				// Do not drop the caller or its ancestors: a shell standing in a
 				// foreign slot is real usage, even when it holds no durable lease.
 				processes, err := findProcessesInWorktree(wt.Path)

@@ -99,6 +99,9 @@ func TestCleanupPreservesSiblingWorktree(t *testing.T) {
 				if err := os.RemoveAll(repoDir); err != nil {
 					t.Fatal(err)
 				}
+				if err := os.Remove(filepath.Join(target, "README.md")); err != nil {
+					t.Fatal(err)
+				}
 				result, err := PruneAllWithOptions(filepath.Dir(poolDir), PruneOptions{PruneOrphans: true})
 				if err != nil {
 					t.Fatal(err)

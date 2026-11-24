@@ -203,9 +203,9 @@ func TestRecoveredHandoffUnknownInventoryDeletesNothingLater(t *testing.T) {
 				}
 			}
 			present("handoff")
-			// prune skips the leased slot. (After a return the slot is idle and prune
-			// removes an idle slot wholesale, ignored files included, exactly as for an
-			// ordinary slot: TestOrdinaryIdleSlotPruneControl.)
+			// prune skips the leased slot. (After a return the slot is idle, and prune
+			// skips an idle slot that holds an unseeded ignored file and keeps the file,
+			// exactly as for an ordinary slot: TestOrdinaryIdleSlotPruneControl.)
 			if _, stderr, code := runTreehouse(t, repo, home, env, "prune", "--yes"); code != 0 {
 				t.Fatalf("prune: %d %s", code, stderr)
 			}
@@ -549,9 +549,13 @@ func TestStateIdentityWatcherSeesTransientRewrite(t *testing.T) {
 	}
 }
 
-// Control for the sequence above: prune removes an idle slot wholesale, ignored
-// files included, for a slot that was never recovered. So a file lost to prune
-// after a return is the ordinary lifecycle, not an effect of the handoff's list.
+// Control for the sequence above: the ordinary lifecycle of a slot that was
+// never recovered. Prune does not silently delete an unseeded ignored file in
+// an idle ordinary slot: it skips the slot as unsafe ignored files, and the
+// slot, its registration and the file stay. So a file kept after the sequence
+// is the ordinary lifecycle, not an effect of the handoff's list. The paired
+// control removes the file by hand, and the same prune then drains the slot, so
+// this test cannot pass by prune doing nothing.
 func TestOrdinaryIdleSlotPruneControl(t *testing.T) {
 	repo, home := setupTestRepo(t)
 	root := filepath.Join(home, "scratch-pools")
@@ -561,6 +565,7 @@ func TestOrdinaryIdleSlotPruneControl(t *testing.T) {
 	if code != 0 || json.Unmarshal([]byte(out), &lease) != nil {
 		t.Fatalf("get: %d %s %s", code, out, stderr)
 	}
+	poolDir := filepath.Dir(filepath.Dir(lease.Path))
 	exclude := gitCmd(t, lease.Path, "rev-parse", "--git-path", "info/exclude")
 	if !filepath.IsAbs(exclude) {
 		exclude = filepath.Join(lease.Path, exclude)
@@ -578,10 +583,41 @@ func TestOrdinaryIdleSlotPruneControl(t *testing.T) {
 	if _, stderr, code := runTreehouse(t, repo, home, env, "return", lease.Path); code != 0 {
 		t.Fatalf("return: %d %s", code, stderr)
 	}
-	if _, stderr, code := runTreehouse(t, repo, home, env, "prune", "--yes"); code != 0 {
-		t.Fatalf("prune: %d %s", code, stderr)
+	registered := func() bool {
+		t.Helper()
+		state, err := pool.ReadState(poolDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range state.Worktrees {
+			if entry.Path == lease.Path {
+				return true
+			}
+		}
+		return false
 	}
-	if _, err := os.Lstat(file); err == nil {
-		t.Fatalf("prune kept an ignored file in an idle ordinary slot; the control's premise changed")
+	out, stderr, code = runTreehouse(t, repo, home, env, "prune", "--yes")
+	if code != 0 {
+		t.Fatalf("prune that skipped the slot: %d %s %s", code, out, stderr)
+	}
+	if got, err := os.ReadFile(file); err != nil || string(got) != "x\n" {
+		t.Fatalf("prune must skip an idle ordinary slot holding an unseeded ignored file and keep the file: %q (%v)", got, err)
+	}
+	if info, err := os.Lstat(lease.Path); err != nil || !info.IsDir() || !registered() {
+		t.Fatalf("the skipped slot must stay present and registered: %v", err)
+	}
+	if !strings.Contains(out, pool.PruneSkipIgnoredFiles) || !strings.Contains(out, "handoff-ignored-file") || strings.Contains(out, "Pruned 1 stale worktree") {
+		t.Fatalf("prune output does not name the ignored-file skip: %s", out)
+	}
+
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	out, stderr, code = runTreehouse(t, repo, home, env, "prune", "--yes")
+	if code != 0 {
+		t.Fatalf("prune with no ignored file: %d %s %s", code, out, stderr)
+	}
+	if _, err := os.Lstat(lease.Path); !os.IsNotExist(err) || registered() || !strings.Contains(out, "Pruned 1 stale worktree") {
+		t.Fatalf("prune must still drain an idle ordinary slot with no ignored files: %s (%v)", out, err)
 	}
 }

@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -2359,7 +2361,7 @@ func TestPruneMixedStaleAndSkippedOrphanPrintsOrphanHints(t *testing.T) {
 				"would prune 1 stale worktree",
 				"orphaned (backing repository missing)",
 				"Re-run with --yes to delete these worktrees.",
-				"Re-run with --prune-orphans to include true orphans in the dry run; add --yes to delete them.",
+				"Re-run with --prune-orphans to include true orphans in the dry run; add --yes to delete them. A Git orphan holding anything but its .git marker is kept and listed with its paths.",
 			},
 		},
 		{
@@ -2369,7 +2371,7 @@ func TestPruneMixedStaleAndSkippedOrphanPrintsOrphanHints(t *testing.T) {
 			wants: []string{
 				"Pruned 1 stale worktree",
 				"orphaned (backing repository missing)",
-				"Re-run with --prune-orphans --yes to delete true orphans whose backing repository is missing.",
+				"Re-run with --prune-orphans --yes to delete true orphans whose backing repository is missing; a Git orphan holding anything but its .git marker is kept and listed with its paths.",
 			},
 		},
 		{
@@ -2380,7 +2382,7 @@ func TestPruneMixedStaleAndSkippedOrphanPrintsOrphanHints(t *testing.T) {
 				"would prune 1 stale worktree across 1 pool",
 				"orphaned (backing repository missing)",
 				"Re-run with --all --yes to delete these worktrees.",
-				"Re-run with --all --prune-orphans to include true orphans in the dry run; add --yes to delete them.",
+				"Re-run with --all --prune-orphans to include true orphans in the dry run; add --yes to delete them. A Git orphan holding anything but its .git marker is kept and listed with its paths.",
 			},
 		},
 		{
@@ -2391,7 +2393,7 @@ func TestPruneMixedStaleAndSkippedOrphanPrintsOrphanHints(t *testing.T) {
 			wants: []string{
 				"Pruned 1 stale worktree across 1 pool",
 				"orphaned (backing repository missing)",
-				"Re-run with --all --prune-orphans --yes to delete true orphans whose backing repository is missing.",
+				"Re-run with --all --prune-orphans --yes to delete true orphans whose backing repository is missing; a Git orphan holding anything but its .git marker is kept and listed with its paths.",
 			},
 		},
 	}
@@ -2443,6 +2445,9 @@ func TestPruneAllReportsOrphanWithoutRawGitErrorsAndPrunesOnlyWithExplicitFlag(t
 	if err := os.RemoveAll(repoDir); err != nil {
 		t.Fatalf("RemoveAll repo failed: %v", err)
 	}
+	if err := os.Remove(filepath.Join(wtPath, "README.md")); err != nil {
+		t.Fatal(err)
+	}
 
 	outsideDir := t.TempDir()
 	pruneOut, pruneErr, code := runTreehouseFromDir(t, repoDir, outsideDir, homeDir, nil, "prune", "--all")
@@ -2479,6 +2484,106 @@ func TestPruneAllReportsOrphanWithoutRawGitErrorsAndPrunesOnlyWithExplicitFlag(t
 	}
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Fatalf("expected orphan to be removed after explicit prune, stat err: %v", err)
+	}
+}
+
+func TestPruneOrphansRefusesFileIgnoredOnlyByDeletedInfoExclude(t *testing.T) {
+	repoDir, homeDir := setupTestRepo(t)
+	env := []string{"SHELL=" + exitShellBin}
+	if err := os.WriteFile(filepath.Join(repoDir, ".git", "info", "exclude"), []byte(".env.local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, getErr, code := runTreehouse(t, repoDir, homeDir, env, "get")
+	if code != 0 {
+		t.Fatalf("get failed (code %d): %s", code, getErr)
+	}
+	wtPath := extractWorktreePath(getErr, homeDir)
+	if wtPath == "" {
+		t.Fatal("could not extract worktree path")
+	}
+	secret := filepath.Join(wtPath, ".env.local")
+	const unique = "unique secret bytes\n"
+	if err := os.WriteFile(secret, []byte(unique), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(repoDir); err != nil {
+		t.Fatalf("RemoveAll repo failed: %v", err)
+	}
+
+	outsideDir := t.TempDir()
+	pruneOut, pruneErr, code := runTreehouseFromDir(t, repoDir, outsideDir, homeDir, nil, "prune", "--all", "--prune-orphans", "--yes")
+	if code != 0 {
+		t.Fatalf("prune --all --prune-orphans --yes failed (code %d): %s", code, pruneErr)
+	}
+	if strings.Contains(pruneOut, "Pruned") || !strings.Contains(pruneOut, "orphan has untracked or ignored paths") || !strings.Contains(pruneOut, ".env.local") {
+		t.Fatalf("expected orphan refusal naming .env.local, got stdout:\n%s\nstderr:\n%s", pruneOut, pruneErr)
+	}
+	data, err := os.ReadFile(secret)
+	if err != nil || string(data) != unique {
+		t.Fatalf("ignored file did not survive orphan prune: %q (%v)", data, err)
+	}
+}
+
+func TestPruneOrphanRefusalCapsPathListUnlessVerbose(t *testing.T) {
+	repoDir, homeDir := setupTestRepo(t)
+	env := []string{"SHELL=" + exitShellBin}
+
+	_, getErr, code := runTreehouse(t, repoDir, homeDir, env, "get")
+	if code != 0 {
+		t.Fatalf("get failed (code %d): %s", code, getErr)
+	}
+	wtPath := extractWorktreePath(getErr, homeDir)
+	if wtPath == "" {
+		t.Fatal("could not extract worktree path")
+	}
+	want := []string{"README.md"}
+	for i := 0; i < 12; i++ {
+		name := fmt.Sprintf("unique-%02d.txt", i)
+		if err := os.WriteFile(filepath.Join(wtPath, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, name)
+	}
+	if err := os.RemoveAll(repoDir); err != nil {
+		t.Fatalf("RemoveAll repo failed: %v", err)
+	}
+
+	detailPaths := func(out string) ([]string, []string) {
+		t.Helper()
+		var paths, more []string
+		for _, line := range strings.Split(out, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if rest, ok := strings.CutPrefix(trimmed, "detail: "); ok {
+				paths = append(paths, strings.Split(rest, ", ")...)
+			}
+			if strings.HasPrefix(trimmed, "and ") && strings.Contains(trimmed, "more") {
+				more = append(more, trimmed)
+			}
+		}
+		return paths, more
+	}
+
+	outsideDir := t.TempDir()
+	pruneOut, pruneErr, code := runTreehouseFromDir(t, repoDir, outsideDir, homeDir, nil, "prune", "--all", "--prune-orphans")
+	if code != 0 {
+		t.Fatalf("prune dry run failed (code %d): %s", code, pruneErr)
+	}
+	paths, more := detailPaths(pruneOut)
+	if !reflect.DeepEqual(paths, want[:10]) || !reflect.DeepEqual(more, []string{"and 3 more (use --verbose to list all)"}) {
+		t.Fatalf("capped detail = %q, %q; want the first 10 of %q and one 'and 3 more' line, stdout:\n%s", paths, more, want, pruneOut)
+	}
+
+	pruneOut, pruneErr, code = runTreehouseFromDir(t, repoDir, outsideDir, homeDir, nil, "prune", "--all", "--prune-orphans", "--verbose")
+	if code != 0 {
+		t.Fatalf("prune --verbose dry run failed (code %d): %s", code, pruneErr)
+	}
+	paths, more = detailPaths(pruneOut)
+	if !reflect.DeepEqual(paths, want) || len(more) != 0 {
+		t.Fatalf("verbose detail = %q, %q; want every path %q and no 'more' line, stdout:\n%s", paths, more, want, pruneOut)
+	}
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("dry run removed orphan %s: %v", wtPath, err)
 	}
 }
 

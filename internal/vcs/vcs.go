@@ -440,17 +440,38 @@ func RemoveCleanWorktree(repoRoot, path string) error {
 	return backendForRemoval(repoRoot, path).RemoveCleanWorktree(repoRoot, path)
 }
 
+// RequireCleanRemovalAllowed applies Git's shared non-forced-removal judgment.
+// It deliberately leaves jj behavior unchanged; only Git has this judgment.
+func RequireCleanRemovalAllowed(repoRoot, poolDir, path string, seededPaths []string) error {
+	if WorktreeBackendName(path) != "git" {
+		return nil
+	}
+	return gitvcs.RequireCleanRemovalAllowed(repoRoot, poolDir, path, seededPaths)
+}
+
+// RequireOrphanRemovalAllowed applies Git's removal judgment for a worktree
+// whose backing repository is missing. jj behavior is unchanged.
+func RequireOrphanRemovalAllowed(path string) error {
+	if WorktreeBackendName(path) != "git" {
+		return nil
+	}
+	return gitvcs.RequireOrphanRemovalAllowed(path)
+}
+
+// IgnoredPathRefusal reports an ignored path that is not provably regenerable.
+type IgnoredPathRefusal = gitvcs.IgnoredPathRefusal
+
 // ErrWorktreeNotDisposable is a safety refusal before automatic removal starts.
 var ErrWorktreeNotDisposable = gitvcs.ErrWorktreeNotDisposable
 
 // RemoveLandedWorktree removes only a clean linked Git worktree whose commits
 // are still reachable on a remote. beforeRemove runs with HEAD locked so the
 // pool can make its final process and ownership checks before deletion.
-func RemoveLandedWorktree(repoRoot, path string, seededPaths []string, beforeRemove func() error) error {
+func RemoveLandedWorktree(repoRoot, poolDir, path string, seededPaths []string, beforeRemove func() error) error {
 	if WorktreeBackendName(path) != "git" {
 		return fmt.Errorf("%w: automatic reclamation requires a Git worktree", ErrWorktreeNotDisposable)
 	}
-	return gitvcs.RemoveLandedWorktree(repoRoot, path, seededPaths, beforeRemove)
+	return gitvcs.RemoveLandedWorktree(repoRoot, poolDir, path, seededPaths, beforeRemove)
 }
 
 // slotMarkerBackend reports the backend a worktree's own marker names: a

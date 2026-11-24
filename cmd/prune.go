@@ -6,6 +6,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -30,12 +32,29 @@ var pruneCmd = &cobra.Command{
 
 A worktree is stale only when treehouse manages it, no owner reservation or
 running process is using it, it has no uncommitted changes, and its HEAD is
-already merged into the default branch.
+already merged into the default branch. Git slots also refuse ignored files
+unless each is an authenticated seed matching what current seeding would write:
+regular-file bytes, including link-target text for a symbolic source. The source
+must lie outside the slot and pool after resolving parent links and must not
+share the slot file's inode; a symbolic-link source whose target lies in the
+slot or the pool is not independent; mode alone is not compared.
+This is checked during planning and again
+before deletion; concurrent writes after the last check are not protected.
+Git slots with replacement refs, locked or modules metadata, or an initialized
+submodule are also skipped, as foreign-slot reclamation skips them; a slot refused
+for an ignored path is listed under "unsafe ignored files" with the path shown.
+A failure to run the check itself keeps the slot and is reported as "cannot
+verify worktree", not as "unsafe ignored files".
+The ignored-file judgment does not cover jj slots. A Git orphan included by
+--prune-orphans is refused, with every path named, when it holds any file other
+than its .git marker: with the index and the repository's excludes gone, an
+ignored file cannot be told from an untracked or committed one.
 
 Prune is a dry run by default. Pass --yes to delete the listed candidates.
 Backing-repository-missing orphans are reported by default. Pass --prune-orphans
 to include them as unverified candidates, and combine it with --yes to delete
-them.
+them. A Git orphan that holds anything but its .git marker is kept and listed
+with its paths (the first 10 without --verbose).
 Pass --all or --global to sweep every managed pool under the user-level
 treehouse root from any directory. Global prune derives each worktree's owning
 repository from git metadata and requires the configured root to be unset or
@@ -99,7 +118,7 @@ func init() {
 	pruneCmd.Flags().BoolVar(&pruneYes, "yes", false, "Delete listed prune candidates instead of doing a dry run")
 	pruneCmd.Flags().BoolVar(&pruneAll, "all", false, "Sweep every managed pool under the user-level treehouse root")
 	pruneCmd.Flags().BoolVar(&pruneGlobal, "global", false, "Alias for --all")
-	pruneCmd.Flags().BoolVar(&pruneOrphans, "prune-orphans", false, "Include backing-repository-missing orphaned worktrees in prune candidates")
+	pruneCmd.Flags().BoolVar(&pruneOrphans, "prune-orphans", false, "Include backing-repository-missing orphans in prune candidates; a Git orphan holding anything but its .git marker is kept and listed with its paths")
 	pruneCmd.Flags().BoolVarP(&pruneVerbose, "verbose", "v", false, "Show detailed skip diagnostics")
 	rootCmd.AddCommand(pruneCmd)
 }
@@ -149,6 +168,7 @@ func printPruneAllResult(w io.Writer, result pool.PruneAllResult, dryRun bool, p
 	if dryRun {
 		if len(result.Result.Candidates) == 0 {
 			fmt.Fprintf(w, "🌳 No stale worktrees to prune across %d %s.\n", poolCount, plural("pool", poolCount))
+			printPrunePools(w, result.Pools, true)
 			printPruneSkipped(w, result.Result.Skipped, verbose)
 			printPruneOrphanHint(w, result.Result.Skipped, true, pruneOrphans, false)
 			return
@@ -162,6 +182,7 @@ func printPruneAllResult(w io.Writer, result pool.PruneAllResult, dryRun bool, p
 			plural("pool", poolCount),
 			formatBytes(result.Result.ReclaimableBytes),
 		)
+		printPrunePools(w, result.Pools, true)
 		printPruneWorktrees(w, result.Result.Candidates)
 		printPruneSkipped(w, result.Result.Skipped, verbose)
 		fmt.Fprintf(w, "🌳 Re-run with %s to delete these worktrees.\n", pruneDeleteFlags(true, pruneOrphans))
@@ -171,6 +192,7 @@ func printPruneAllResult(w io.Writer, result pool.PruneAllResult, dryRun bool, p
 
 	if len(result.Result.Pruned) == 0 {
 		fmt.Fprintf(w, "🌳 No stale worktrees pruned across %d %s.\n", poolCount, plural("pool", poolCount))
+		printPrunePools(w, result.Pools, false)
 		printPruneSkipped(w, result.Result.Skipped, verbose)
 		printPruneOrphanHint(w, result.Result.Skipped, true, pruneOrphans, true)
 		return
@@ -184,9 +206,29 @@ func printPruneAllResult(w io.Writer, result pool.PruneAllResult, dryRun bool, p
 		plural("pool", poolCount),
 		formatBytes(result.Result.FreedBytes),
 	)
+	printPrunePools(w, result.Pools, false)
 	printPruneWorktrees(w, result.Result.Pruned)
 	printPruneSkipped(w, result.Result.Skipped, verbose)
 	printPruneOrphanHint(w, result.Result.Skipped, true, pruneOrphans, true)
+}
+
+// printPrunePools names every pool a global prune discovered, including pools
+// with nothing to prune (for example one holding only leased slots), so a pool
+// can never be silently absent from the report. It changes no eligibility.
+func printPrunePools(w io.Writer, pools []pool.PrunePoolResult, dryRun bool) {
+	if len(pools) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "🌳 Inspected %d %s:\n", len(pools), plural("pool", len(pools)))
+	for _, p := range pools {
+		acted := len(p.Result.Pruned)
+		verb := "pruned"
+		if dryRun {
+			acted = len(p.Result.Candidates)
+			verb = "would prune"
+		}
+		fmt.Fprintf(w, "  %s  %s %d, skipped %d\n", ui.PrettyPath(p.PoolDir), verb, acted, len(p.Result.Skipped))
+	}
 }
 
 func printPruneWorktrees(w io.Writer, worktrees []pool.PruneWorktree) {
@@ -216,24 +258,70 @@ func printPruneSkipped(w io.Writer, skipped []pool.PruneSkipped, verbose bool) {
 	fmt.Fprintf(w, "🌳 Skipped %d unsafe idle %s:\n", len(skipped), plural("worktree", len(skipped)))
 	for _, category := range orderedPruneSkipCategories(skipped) {
 		group := pruneSkipGroup(skipped, category)
-		fmt.Fprintf(w, "  %s:\n", category)
+		fmt.Fprintf(w, "  %s:\n", escapePruneDetail(category))
 		reasonWidth := 0
 		for _, wt := range group {
-			if pruneSkipShowsReason(wt) && len(wt.Reason) > reasonWidth {
-				reasonWidth = len(wt.Reason)
+			if reason := escapePruneDetail(wt.Reason); pruneSkipShowsReason(wt) && len(reason) > reasonWidth {
+				reasonWidth = len(reason)
 			}
 		}
 		for _, wt := range group {
 			if pruneSkipShowsReason(wt) {
-				fmt.Fprintf(w, "  %-4s  %-*s  %s\n", wt.Name, reasonWidth, wt.Reason, ui.PrettyPath(wt.Path))
+				fmt.Fprintf(w, "  %-4s  %-*s  %s\n", wt.Name, reasonWidth, escapePruneDetail(wt.Reason), ui.PrettyPath(wt.Path))
 			} else {
 				fmt.Fprintf(w, "  %-4s  %s\n", wt.Name, ui.PrettyPath(wt.Path))
 			}
-			if verbose && wt.Detail != "" {
-				fmt.Fprintf(w, "        detail: %s\n", wt.Detail)
+			if wt.Detail != "" && (verbose || pruneSkipCategory(wt) == pool.PruneSkipIgnoredFiles) {
+				printPruneSkipDetail(w, wt, verbose)
 			}
 		}
 	}
+}
+
+const prunePathListLimit = 10
+
+func printPruneSkipDetail(w io.Writer, wt pool.PruneSkipped, verbose bool) {
+	if len(wt.Paths) == 0 {
+		fmt.Fprintf(w, "        detail: %s\n", escapePruneDetail(wt.Detail))
+		return
+	}
+	shown := wt.Paths
+	if !verbose && len(shown) > prunePathListLimit {
+		shown = shown[:prunePathListLimit]
+	}
+	escaped := make([]string, len(shown))
+	for i, path := range shown {
+		escaped[i] = escapePruneDetail(path)
+	}
+	fmt.Fprintf(w, "        detail: %s\n", strings.Join(escaped, ", "))
+	if remaining := len(wt.Paths) - len(shown); remaining > 0 {
+		fmt.Fprintf(w, "        and %d more (use --verbose to list all)\n", remaining)
+	}
+}
+
+// escapePruneDetail keeps skip text that can hold checkout path names on one
+// line and stops it from sending terminal control sequences.
+func escapePruneDetail(text string) string {
+	var b strings.Builder
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		switch {
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, text[i])
+		case unicode.IsControl(r):
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteString(text[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
 }
 
 func pruneSkipShowsReason(wt pool.PruneSkipped) bool {
@@ -313,14 +401,14 @@ func printPruneOrphanHint(w io.Writer, skipped []pool.PruneSkipped, all bool, pr
 		return
 	}
 	if yes {
-		fmt.Fprintf(w, "🌳 Re-run with %s to delete true orphans whose backing repository is missing.\n", pruneDeleteFlags(all, true))
+		fmt.Fprintf(w, "🌳 Re-run with %s to delete true orphans whose backing repository is missing; a Git orphan holding anything but its .git marker is kept and listed with its paths.\n", pruneDeleteFlags(all, true))
 		return
 	}
 	flags := "--prune-orphans"
 	if all {
 		flags = "--all --prune-orphans"
 	}
-	fmt.Fprintf(w, "🌳 Re-run with %s to include true orphans in the dry run; add --yes to delete them.\n", flags)
+	fmt.Fprintf(w, "🌳 Re-run with %s to include true orphans in the dry run; add --yes to delete them. A Git orphan holding anything but its .git marker is kept and listed with its paths.\n", flags)
 }
 
 func hasSkippedCategory(skipped []pool.PruneSkipped, category string) bool {

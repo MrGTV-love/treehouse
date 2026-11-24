@@ -37,6 +37,9 @@ type PruneSkipped struct {
 	Reason string
 	// Detail carries raw diagnostics intended for verbose output.
 	Detail string
+	// Paths lists every refused path when a refusal names more than one;
+	// Detail then holds the same paths joined.
+	Paths []string
 }
 
 // PruneResult describes dry-run candidates, removed worktrees, skipped worktrees,
@@ -81,7 +84,10 @@ const (
 	// PruneSkipOrphanedBackingRepo means the linked worktree's gitdir is gone.
 	PruneSkipOrphanedBackingRepo = "orphaned (backing repository missing)"
 	// PruneSkipOriginUnreachable means origin could not be reached for verification.
-	PruneSkipOriginUnreachable     = "origin unreachable (cannot verify)"
+	PruneSkipOriginUnreachable = "origin unreachable (cannot verify)"
+	// PruneSkipIgnoredFiles groups slots holding an ignored path that is not
+	// provably regenerable; each skip's Detail names the path.
+	PruneSkipIgnoredFiles          = "unsafe ignored files"
 	pruneSkipCannotVerify          = "cannot verify worktree"
 	pruneSkipCannotCheckProcesses  = "cannot check processes"
 	pruneSkipCannotMeasureSize     = "cannot measure size"
@@ -537,7 +543,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 			}
 
 			if worktree.Orphaned {
-				if err := removeWorktreeDirectory(poolDir, worktree.Path); err != nil {
+				if err := pruneRemoveWorktreeDirectory(poolDir, worktree.Path); err != nil {
 					clearReservation(&state.Worktrees[idx])
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "could not remove worktree directory", err.Error()))
 					continue
@@ -551,7 +557,7 @@ func executePrune(poolDir string, plan prunePlan, options PruneOptions) (PruneRe
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipRemoveFailed, "VCS refused to remove worktree", err.Error()))
 					continue
 				}
-				if err := removeWorktreeDirectory(poolDir, worktree.Path); err != nil {
+				if err := pruneRemoveWorktreeDirectory(poolDir, worktree.Path); err != nil {
 					clearReservation(&state.Worktrees[idx])
 					result.Skipped = append(result.Skipped, newPruneSkipped(worktree.Name, worktree.Path, pruneSkipCleanupFailed, "could not remove worktree directory", err.Error()))
 					continue
@@ -647,6 +653,9 @@ func finalOrphanPruneSafetyCheck(poolDir string, wt WorktreeEntry) (PruneWorktre
 		return worktree, newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "cannot measure size", err.Error())
 	}
 	worktree.Bytes = bytes
+	if err := vcs.RequireOrphanRemovalAllowed(worktree.Path); err != nil {
+		return worktree, removalJudgmentSkipped(wt, err)
+	}
 	return worktree, skipped
 }
 
@@ -677,6 +686,9 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 			return worktree, skipped, true, pruneContext{}, nil
 		}
 		worktree.Bytes = bytes
+		if err := vcs.RequireOrphanRemovalAllowed(worktree.Path); err != nil {
+			return worktree, removalJudgmentSkipped(wt, err), true, pruneContext{}, nil
+		}
 		worktree.Orphaned = true
 		worktree.Warning = pruneOrphanUnverifiedWarning
 		return worktree, skipped, true, pruneContext{}, nil
@@ -732,7 +744,34 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 		return worktree, skipped, true, context, nil
 	}
 	worktree.Bytes = bytes
+	if err := vcs.RequireCleanRemovalAllowed(context.RepoRoot, poolDir, worktree.Path, authenticatedSeedInventory(wt)); err != nil {
+		skipped = removalJudgmentSkipped(wt, err)
+	}
 	return worktree, skipped, true, context, nil
+}
+
+func authenticatedSeedInventory(wt WorktreeEntry) []string {
+	if !wt.SeedInventoryKnown {
+		return nil
+	}
+	return wt.SeededPaths
+}
+
+func removalJudgmentSkipped(wt WorktreeEntry, err error) PruneSkipped {
+	var ignored *vcs.IgnoredPathRefusal
+	if errors.As(err, &ignored) {
+		detail := ignored.Detail
+		if ignored.Cause != nil {
+			if detail != "" {
+				detail += ": "
+			}
+			detail += ignored.Cause.Error()
+		}
+		skipped := newPruneSkipped(wt.Name, wt.Path, PruneSkipIgnoredFiles, ignored.Reason, detail)
+		skipped.Paths = ignored.Paths
+		return skipped
+	}
+	return newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotVerify, err.Error(), "")
 }
 
 type pruneVerificationError struct {
@@ -856,6 +895,11 @@ func linkedWorktreeGitDir(worktreePath string) (string, bool, string) {
 	}
 	return filepath.Clean(gitDir), true, ""
 }
+
+// pruneRemoveWorktreeDirectory is the prune path's call to removeWorktreeDirectory.
+// It is a variable only so tests can install an observer that records the call and
+// then delegates to the real function; nothing else reassigns it.
+var pruneRemoveWorktreeDirectory = removeWorktreeDirectory
 
 // removeWorktreeDirectory removes only the target's contents. A pool-owned
 // parent is optional cleanup: os.Remove succeeds only when it is empty, so

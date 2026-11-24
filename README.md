@@ -478,7 +478,7 @@ Git prune uses the same ignored-file removal judgment as foreign-slot reclamatio
 
 A slot refused for an ignored path is listed under `unsafe ignored files`, and the path is printed on a `detail:` line below the slot, even without `--verbose`. A failure to run the check itself (for example, a failed `git ls-files`) also keeps the slot, but it is reported as `cannot verify worktree`, not as `unsafe ignored files`. Because prune now shares the whole foreign-slot removal judgment, it also skips a Git slot that has replacement refs, a `locked` or `modules` metadata marker, or an initialized submodule, as foreign-slot reclamation does.
 
-A file that changes while its bytes are being compared (inode or file identity or change time differs before and after the read) refuses its slot. The final check also re-compares the source after pre-destroy hooks. It does not exclude concurrent writers: a write after that check and before native Git removal can still be deleted. This ignored-file judgment does not cover jj slots or explicitly opted-in missing-repository orphans. Do not enable unattended prune until the unseeded and seeded-then-modified cases have passed through the actual deletion path at the installed binary's head; Treehouse installs no scheduler and cannot control schedules configured outside this repository.
+A file that changes while its bytes are being compared (inode or file identity or change time differs before and after the read) refuses its slot. The final check also re-compares the source after pre-destroy hooks. It does not exclude concurrent writers: a write after that check and before native Git removal can still be deleted. This ignored-file judgment does not cover jj slots. Do not enable unattended prune until the unseeded and seeded-then-modified cases have passed through the actual deletion path at the installed binary's head; Treehouse installs no scheduler and cannot control schedules configured outside this repository.
 
 Skip output is grouped by reason so large global sweeps stay scannable.
 When `origin` exists, prune fetches it and checks the current remote default branch tracking ref first.
@@ -488,6 +488,7 @@ If a linked worktree points at a missing backing repository, prune reports `orph
 Plain `treehouse prune` and `treehouse prune --all` never delete those orphans.
 Pass `--prune-orphans` to include true backing-repository-missing orphans in the dry run, then add `--yes` to delete them.
 Treehouse cannot verify orphan contents after the backing version-control metadata is gone, so each orphan candidate is marked `content could not be verified`.
+A Git orphan is still refused, at planning and at the final pre-delete check, when it holds an ignored file, and the path is listed under `unsafe ignored files`. With the repository gone, its ignore rules come from the slot's own `.gitignore` files and your global excludes, so a committed file that matches an ignore rule also keeps the orphan. No seed source exists, so a seeded file also keeps the orphan.
 Use `--verbose` to show the underlying version-control diagnostic details for skipped worktrees.
 
 ### Destroying worktrees

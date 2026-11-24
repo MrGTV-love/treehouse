@@ -43,8 +43,10 @@ submodule are also skipped, as foreign-slot reclamation skips them; a slot refus
 for an ignored path is listed under "unsafe ignored files" with the path shown.
 A failure to run the check itself keeps the slot and is reported as "cannot
 verify worktree", not as "unsafe ignored files".
-The ignored-file judgment does not cover jj slots or opted-in missing-repository
-orphans.
+The ignored-file judgment does not cover jj slots. A Git orphan included by
+--prune-orphans is refused when it holds any ignored file, seeded or not, judged
+by the slot's own .gitignore files and global excludes (a committed file that
+matches them also counts).
 
 Prune is a dry run by default. Pass --yes to delete the listed candidates.
 Backing-repository-missing orphans are reported by default. Pass --prune-orphans

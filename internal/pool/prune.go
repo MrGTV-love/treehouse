@@ -650,6 +650,9 @@ func finalOrphanPruneSafetyCheck(poolDir string, wt WorktreeEntry) (PruneWorktre
 		return worktree, newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotMeasureSize, "cannot measure size", err.Error())
 	}
 	worktree.Bytes = bytes
+	if err := vcs.RequireOrphanRemovalAllowed(poolDir, worktree.Path); err != nil {
+		return worktree, removalJudgmentSkipped(wt, err)
+	}
 	return worktree, skipped
 }
 
@@ -680,6 +683,9 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 			return worktree, skipped, true, pruneContext{}, nil
 		}
 		worktree.Bytes = bytes
+		if err := vcs.RequireOrphanRemovalAllowed(poolDir, worktree.Path); err != nil {
+			return worktree, removalJudgmentSkipped(wt, err), true, pruneContext{}, nil
+		}
 		worktree.Orphaned = true
 		worktree.Warning = pruneOrphanUnverifiedWarning
 		return worktree, skipped, true, pruneContext{}, nil
@@ -735,27 +741,32 @@ func analyzeIdleWorktree(poolDir string, resolveContext pruneContextResolver, wt
 		return worktree, skipped, true, context, nil
 	}
 	worktree.Bytes = bytes
-	seededPaths := wt.SeededPaths
-	if !wt.SeedInventoryKnown {
-		seededPaths = nil
-	}
-	if err := vcs.RequireCleanRemovalAllowed(context.RepoRoot, poolDir, worktree.Path, seededPaths); err != nil {
-		var ignored *vcs.IgnoredPathRefusal
-		if errors.As(err, &ignored) {
-			detail := ignored.Detail
-			if ignored.Cause != nil {
-				if detail != "" {
-					detail += ": "
-				}
-				detail += ignored.Cause.Error()
-			}
-			skipped = newPruneSkipped(wt.Name, wt.Path, PruneSkipIgnoredFiles, ignored.Reason, detail)
-			return worktree, skipped, true, context, nil
-		}
-		skipped = newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotVerify, err.Error(), "")
-		return worktree, skipped, true, context, nil
+	if err := vcs.RequireCleanRemovalAllowed(context.RepoRoot, poolDir, worktree.Path, authenticatedSeedInventory(wt)); err != nil {
+		skipped = removalJudgmentSkipped(wt, err)
 	}
 	return worktree, skipped, true, context, nil
+}
+
+func authenticatedSeedInventory(wt WorktreeEntry) []string {
+	if !wt.SeedInventoryKnown {
+		return nil
+	}
+	return wt.SeededPaths
+}
+
+func removalJudgmentSkipped(wt WorktreeEntry, err error) PruneSkipped {
+	var ignored *vcs.IgnoredPathRefusal
+	if errors.As(err, &ignored) {
+		detail := ignored.Detail
+		if ignored.Cause != nil {
+			if detail != "" {
+				detail += ": "
+			}
+			detail += ignored.Cause.Error()
+		}
+		return newPruneSkipped(wt.Name, wt.Path, PruneSkipIgnoredFiles, ignored.Reason, detail)
+	}
+	return newPruneSkipped(wt.Name, wt.Path, pruneSkipCannotVerify, err.Error(), "")
 }
 
 type pruneVerificationError struct {

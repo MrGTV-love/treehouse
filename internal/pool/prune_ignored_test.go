@@ -135,3 +135,87 @@ func TestPruneFinalCheckPreservesIgnoredFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestPruneOrphansPreservesIgnoredFiles(t *testing.T) {
+	for _, scenario := range []string{"clean", "unseeded", "late-unseeded", "seeded"} {
+		t.Run(scenario, func(t *testing.T) {
+			repo, poolDir := setupRepo(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("USERPROFILE", os.Getenv("HOME"))
+			t.Setenv("TREEHOUSE_ROOT", filepath.Dir(poolDir))
+			write := func(path, content string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(filepath.Join(repo, ".gitignore"), "*.local\n")
+			if scenario == "seeded" {
+				write(filepath.Join(repo, ".worktreeinclude"), "seed.local\n")
+				write(filepath.Join(repo, "seed.local"), "seed\n")
+			}
+			runGit(t, repo, "add", ".")
+			runGit(t, repo, "commit", "-m", "ignored fixture")
+			runGit(t, repo, "push", "origin", "main")
+			slot, err := Acquire(repo, poolDir, 1, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clearOwnerReservation(t, poolDir, slot)
+			file := filepath.Join(slot, ".env.local")
+			var hooks []string
+			switch scenario {
+			case "unseeded":
+				write(file, "unique\n")
+			case "late-unseeded":
+				hooks = []string{"echo unique > " + quoteForShell(file)}
+			case "seeded":
+				file = filepath.Join(slot, "seed.local")
+			}
+			if err := os.RemoveAll(repo); err != nil {
+				t.Fatal(err)
+			}
+			before, err := ReadState(poolDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := PruneAllWithOptions(filepath.Dir(poolDir), PruneOptions{PruneOrphans: true, PreDestroy: hooks})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "clean" {
+				if len(result.Result.Pruned) != 1 || !result.Result.Pruned[0].Orphaned {
+					t.Fatalf("clean orphan was not pruned: %+v", result.Result)
+				}
+				if _, err := os.Stat(slot); !os.IsNotExist(err) {
+					t.Fatalf("clean orphan slot survived: %v", err)
+				}
+				return
+			}
+			if len(result.Result.Pruned) != 0 || len(result.Result.Skipped) != 1 || result.Result.Skipped[0].Category != PruneSkipIgnoredFiles {
+				t.Fatalf("orphan holding an ignored file was not refused: %+v", result.Result)
+			}
+			if !strings.Contains(result.Result.Skipped[0].Detail, filepath.Base(file)) {
+				t.Errorf("refusal does not name the ignored path: %+v", result.Result.Skipped[0])
+			}
+			if _, err := os.Stat(file); err != nil {
+				t.Errorf("ignored file did not survive: %v", err)
+			}
+			after, err := ReadState(poolDir)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Errorf("refusal changed registration or leaked reservation: before=%+v after=%+v (%v)", before, after, err)
+			}
+			if err := os.Remove(file); err != nil {
+				t.Fatal(err)
+			}
+			retry, err := PruneAllWithOptions(filepath.Dir(poolDir), PruneOptions{PruneOrphans: true})
+			if err != nil || len(retry.Result.Pruned) != 1 || len(retry.Result.Skipped) != 0 {
+				t.Fatalf("resolved orphan was not pruned: %+v (%v)", retry.Result, err)
+			}
+			if _, err := os.Stat(slot); !os.IsNotExist(err) {
+				t.Fatalf("retry did not remove orphan slot: %v", err)
+			}
+		})
+	}
+}
